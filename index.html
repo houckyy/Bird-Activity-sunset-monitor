@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#081418">
+<title>Photography & Bird Activity Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,650&family=Inter:wght@400;500;600;650;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="suncalc-lite.js"></script>
+</head>
+<body>
+<header class="app-header">
+  <svg class="drift-bird" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 13c4-6 9-8 13-8 5 0 8 2.5 8 6 0 2.4-2.3 3.6-4.7 3.6-1.8 0-3-0.7-3.6-1.8"/><path d="M15.8 10.8c1.8 0 3 1.2 3 2.6S17.6 16 15.8 16c-3.6 0-7.8-1.2-10.8-3.6"/></svg>
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 21c-4-1-7-5-7-9 4 0 8 1 9 5 1-6-2-11-8-13 8-1 14 4 14 11 0 3.5-2 6-6 6-1 0-2-.3-2 0Z"/></svg>
+    </div>
+    <div>
+      <div class="field-stamp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20M5 5l14 14M19 5L5 19"/></svg>Field Instrument</div>
+      <h1>Photography &amp; Bird Activity Monitor</h1>
+      <p class="subtitle">Light quality, exposure conditions, and bird activity, computed from real astronomical and weather data.</p>
+    </div>
+  </div>
+  <div class="location-box">
+    <label for="loc-input">Location</label>
+    <div class="loc-row">
+      <input id="loc-input" type="text" placeholder="lat, lon (e.g. 40.5853, -105.0844)">
+      <button id="use-gps">Use GPS</button>
+      <button id="set-loc">Set</button>
+    </div>
+    <div id="loc-label" class="loc-label">No location set</div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="dashboard">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+    <span>Dashboard</span>
+  </button>
+  <button class="tab-btn" data-tab="outlook">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
+    <span>Outlook</span>
+  </button>
+  <button class="tab-btn" data-tab="log">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h3l2-2h6l2 2h3v11H4z"/><circle cx="12" cy="13.5" r="3.2"/></svg>
+    <span>Shoot Log</span>
+  </button>
+  <button class="tab-btn" data-tab="about">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg>
+    <span>Notes</span>
+  </button>
+</nav>
+
+<main>
+  <section id="dashboard" class="tab-panel active">
+    <div class="grid">
+
+      <div class="card" id="card-sun">
+        <h2><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2 12h2.5M19.5 12H22M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>Sun &amp; Light</h2>
+        <div class="big-stat" id="sun-phase">--</div>
+        <div class="sub-stat" id="sun-elevation">Elevation: --°</div>
+        <div class="quality-row">
+          <div class="quality-ring-block">
+            <div class="ring" id="ring-sunrise"><span id="q-sunrise">--</span></div>
+            <div class="ring-label">Sunrise<br><span id="q-sunrise-label">--</span></div>
+          </div>
+          <div class="quality-ring-block">
+            <div class="ring" id="ring-sunset"><span id="q-sunset">--</span></div>
+            <div class="ring-label">Sunset<br><span id="q-sunset-label">--</span></div>
+          </div>
+        </div>
+        <table class="time-table" id="sun-times">
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card" id="card-weather">
+        <h2><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 16.5a4 4 0 0 1 .5-8 5 5 0 0 1 9.7-1.5A4.5 4.5 0 0 1 17.5 16H7Z"/></svg>Weather &amp; Exposure</h2>
+        <div class="big-stat verdict-line" id="exposure-verdict">--</div>
+        <div class="sub-stat" id="iso-suggestion">Suggested ISO range: --</div>
+        <table class="time-table" id="weather-table">
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card wide" id="card-bird">
+        <h2><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12c3-5 7-7 11-7 4 0 7 2 7 5 0 2-2 3-4 3-1.5 0-2.5-.6-3-1.5"/><path d="M14 10c1.5 0 2.5 1 2.5 2.2S15.5 14.5 14 14.5c-3 0-6.5-1-9-3"/><circle cx="17.3" cy="8.2" r=".6" fill="currentColor" stroke="none"/></svg>Bird Activity Meter</h2>
+        <div class="meter-row">
+          <div class="meter-wrap">
+            <div class="meter-bar"><div id="bird-fill" class="meter-fill"></div></div>
+            <div class="meter-label"><span id="bird-score">--</span><span class="meter-max">/100</span></div>
+          </div>
+          <div id="bird-verdict" class="big-stat small verdict-line">--</div>
+        </div>
+        <div class="factor-grid" id="bird-factors"></div>
+      </div>
+
+    </div>
+    <button id="refresh-btn" class="refresh-btn">
+      <svg class="refresh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11A8 8 0 1 0 6.3 17.7M20 11V5M20 11h-6"/></svg>
+      <span>Refresh Data</span>
+    </button>
+    <div id="status-msg" class="status-msg"></div>
+    <div id="live-clock" class="live-clock"><span class="live-dot"></span><span id="live-clock-text">--</span></div>
+  </section>
+
+  <section id="outlook" class="tab-panel">
+    <h2 class="section-h2"><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>7-Day Sunrise/Sunset Quality Outlook</h2>
+    <p class="sub-stat">Quality = real cloud cover by altitude band + humidity at the sunrise/sunset hour, from Open-Meteo's hourly forecast. Not a photo of the sky &mdash; a physical model of whether one is likely to show color.</p>
+    <div id="outlook-grid" class="outlook-grid"></div>
+  </section>
+
+  <section id="log" class="tab-panel">
+    <h2 class="section-h2"><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h3l2-2h6l2 2h3v11H4z"/><circle cx="12" cy="13.5" r="3.2"/></svg>Shoot Log</h2>
+    <form id="log-form" class="log-form">
+      <input type="text" id="log-species" placeholder="Species / subject" required>
+      <input type="text" id="log-gear" placeholder="Gear (e.g. R10 + RF 100-400mm)">
+      <input type="text" id="log-notes" placeholder="Notes">
+      <button type="submit">Add Entry</button>
+    </form>
+    <div class="log-actions">
+      <button id="export-csv">Export CSV</button>
+      <button id="clear-log">Clear Log</button>
+    </div>
+    <div class="table-scroll">
+      <table class="log-table" id="log-table">
+        <thead>
+          <tr><th>Date/Time</th><th>Species/Subject</th><th>Gear</th><th>Sun Phase</th><th>Bird Score</th><th>Notes</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="about" class="tab-panel">
+    <h2 class="section-h2"><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg>How the numbers are computed</h2>
+    <div id="about-content"></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
