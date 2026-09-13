@@ -3,15 +3,20 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#081418">
+<meta name="theme-color" content="#efe4cc">
 <title>Photography & Bird Activity Monitor</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,650&family=Inter:wght@400;500;600;650;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <link rel="stylesheet" href="style.css">
 <script src="suncalc-lite.js"></script>
 </head>
 <body>
+<div id="intro-splash" aria-hidden="true">
+  <svg class="intro-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M12 21c-4-1-7-5-7-9 4 0 8 1 9 5 1-6-2-11-8-13 8-1 14 4 14 11 0 3.5-2 6-6 6-1 0-2-.3-2 0Z"/></svg>
+  <div class="intro-text">Photography &amp; Bird Activity Monitor</div>
+</div>
 <header class="app-header">
   <svg class="drift-bird" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 13c4-6 9-8 13-8 5 0 8 2.5 8 6 0 2.4-2.3 3.6-4.7 3.6-1.8 0-3-0.7-3.6-1.8"/><path d="M15.8 10.8c1.8 0 3 1.2 3 2.6S17.6 16 15.8 16c-3.6 0-7.8-1.2-10.8-3.6"/></svg>
   <div class="brand">
@@ -47,6 +52,10 @@
   <button class="tab-btn" data-tab="log">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h3l2-2h6l2 2h3v11H4z"/><circle cx="12" cy="13.5" r="3.2"/></svg>
     <span>Shoot Log</span>
+  </button>
+  <button class="tab-btn" data-tab="map">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 4 3 6.5v13L9 17l6 2.5 6-2.5v-13L15 6.5 9 4Z"/><path d="M9 4v13M15 6.5v13"/></svg>
+    <span>Map</span>
   </button>
   <button class="tab-btn" data-tab="about">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg>
@@ -88,16 +97,21 @@
 
       <div class="card wide" id="card-bird">
         <h2><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12c3-5 7-7 11-7 4 0 7 2 7 5 0 2-2 3-4 3-1.5 0-2.5-.6-3-1.5"/><path d="M14 10c1.5 0 2.5 1 2.5 2.2S15.5 14.5 14 14.5c-3 0-6.5-1-9-3"/><circle cx="17.3" cy="8.2" r=".6" fill="currentColor" stroke="none"/></svg>Bird Activity Meter</h2>
+        <div id="bird-source" class="bird-source">--</div>
         <div class="meter-row">
           <div class="meter-wrap">
             <div class="meter-bar"><div id="bird-fill" class="meter-fill"></div></div>
-            <div class="meter-label"><span id="bird-score">--</span><span class="meter-max">/100</span></div>
+            <div class="meter-label"><span id="bird-score">--</span><span class="meter-max">/1000</span></div>
           </div>
           <div id="bird-verdict" class="big-stat small verdict-line">--</div>
         </div>
         <div class="factor-grid" id="bird-factors"></div>
       </div>
 
+    </div>
+    <div id="stale-banner" class="stale-banner" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+      <span id="stale-banner-text">Showing cached data</span>
     </div>
     <button id="refresh-btn" class="refresh-btn">
       <svg class="refresh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11A8 8 0 1 0 6.3 17.7M20 11V5M20 11h-6"/></svg>
@@ -135,12 +149,57 @@
     </div>
   </section>
 
+  <section id="map" class="tab-panel">
+    <h2 class="section-h2"><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 4 3 6.5v13L9 17l6 2.5 6-2.5v-13L15 6.5 9 4Z"/><path d="M9 4v13M15 6.5v13"/></svg>Terrain &amp; Activity Map</h2>
+    <p class="sub-stat">Topographic base map, with a grid of nearby points sampled from Open-Meteo so cloud cover, wind, and precipitation vary across the terrain, not just at one pin. Each point also checks real elevation data along its sunset sightline - a nearby ridge shows up in the popup as ending direct light earlier there, which matters for shooting at low ISO, but it does not discount the Sunset Quality score itself: the color show depends on the sun's descent below the geometric horizon, which happens whether or not a mountain blocks your direct view of the disc. The Bird Activity layer always uses the weather/astronomy model (real eBird sightings, if you've set a key, only drive the single-point score on the Dashboard - sampling eBird at 25 grid points per refresh isn't practical).</p>
+    <div class="map-toolbar">
+      <div class="map-layer-toggle" role="group" aria-label="Map layer">
+        <button class="map-layer-btn active" data-layer="sunset">Sunset Quality</button>
+        <button class="map-layer-btn" data-layer="bird">Bird Activity</button>
+      </div>
+      <button id="map-refresh-btn" class="map-refresh-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11A8 8 0 1 0 6.3 17.7M20 11V5M20 11h-6"/></svg>
+        <span>Resample grid</span>
+      </button>
+    </div>
+    <div id="map-container" class="map-container">
+      <div id="leaflet-map"></div>
+      <div id="map-loading" class="map-loading">Sampling terrain grid...</div>
+    </div>
+    <div class="map-legend">
+      <div class="legend-swatches">
+        <span class="legend-dot" style="background:#a8371f"></span>Poor
+        <span class="legend-dot" style="background:#8a6a3d"></span>Fair
+        <span class="legend-dot" style="background:#1f6b5c"></span>Good
+        <span class="legend-dot" style="background:#9c6a14"></span>Great
+      </div>
+      <p id="map-status" class="map-status">Switch to the Map tab to load the terrain grid.</p>
+      <p id="map-terrain-note" class="map-status" style="margin-top:2px;"></p>
+    </div>
+  </section>
+
   <section id="about" class="tab-panel">
+    <h2 class="section-h2"><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a2 2 0 0 0-2 2v9.2a4 4 0 1 0 4 0V5a2 2 0 0 0-2-2Z"/><circle cx="12" cy="18" r="1.3" fill="currentColor" stroke="none"/></svg>Units</h2>
+    <p class="sub-stat">Temperature display only - all scoring internally stays in Celsius, since that's what the weather source returns and what the cited thresholds are tuned against.</p>
+    <div class="map-layer-toggle" role="group" aria-label="Temperature unit" id="temp-unit-toggle">
+      <button class="map-layer-btn active" data-unit="F">&deg;Fahrenheit</button>
+      <button class="map-layer-btn" data-unit="C">&deg;Celsius</button>
+    </div>
+
+    <h2 class="section-h2"><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12c3-5 7-7 11-7 4 0 7 2 7 5 0 2-2 3-4 3-1.5 0-2.5-.6-3-1.5"/><path d="M14 10c1.5 0 2.5 1 2.5 2.2S15.5 14.5 14 14.5c-3 0-6.5-1-9-3"/><circle cx="17.3" cy="8.2" r=".6" fill="currentColor" stroke="none"/></svg>Bird data source</h2>
+    <p class="sub-stat">Paste a free eBird API key to switch the Bird Activity Meter to real, recently-reported sightings near you instead of a weather-based estimate. Get one in about 2 minutes at <a href="https://ebird.org/api/keygen" target="_blank" rel="noopener">ebird.org/api/keygen</a> - it's free, instant, no approval wait. The key is stored only in this browser (localStorage), never sent anywhere but eBird's own API.</p>
+    <div class="ebird-key-row">
+      <input type="text" id="ebird-key-input" placeholder="Paste your eBird API key">
+      <button id="save-ebird-key">Save</button>
+    </div>
+    <p id="ebird-key-status" class="ebird-key-status">Checking...</p>
+
     <h2 class="section-h2"><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg>How the numbers are computed</h2>
     <div id="about-content"></div>
   </section>
 </main>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="app.js"></script>
 </body>
 </html>
