@@ -109,15 +109,36 @@
           <div class="quality-ring-block">
             <div class="ring" id="ring-sunrise"><span id="q-sunrise">--</span></div>
             <div class="ring-label">Sunrise<br><span id="q-sunrise-label">--</span></div>
+            <div class="epic-badge" id="epic-badge-sunrise" hidden>&#128293; Epic conditions</div>
+            <div class="q-note" id="q-sunrise-note"></div>
           </div>
           <div class="quality-ring-block">
             <div class="ring" id="ring-sunset"><span id="q-sunset">--</span></div>
             <div class="ring-label">Sunset<br><span id="q-sunset-label">--</span></div>
+            <div class="epic-badge" id="epic-badge-sunset" hidden>&#128293; Epic conditions</div>
+            <div class="q-note" id="q-sunset-note"></div>
           </div>
         </div>
         <table class="time-table" id="sun-times">
           <tbody></tbody>
         </table>
+      </div>
+
+      <div class="card" id="card-golden">
+        <h2><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="13" r="3.4"/><path d="M12 6.5V4M5.6 9.6 4 8M18.4 9.6 20 8M3 17h18"/></svg>Golden Hour Intensity</h2>
+        <div class="big-stat verdict-line" id="golden-verdict">--</div>
+        <div class="sub-stat" id="golden-sub">--</div>
+        <div class="meter-row">
+          <div class="meter-wrap">
+            <div class="meter-bar"><div id="golden-fill" class="meter-fill golden-meter-fill"></div></div>
+            <div class="meter-label"><span id="golden-score">--</span><span class="meter-max">/100</span></div>
+          </div>
+        </div>
+        <div class="sub-stat golden-cct-row">
+          <span class="golden-cct-swatch" id="golden-cct-swatch"></span>
+          <span id="golden-cct">Color temp: --</span>
+        </div>
+        <div class="q-note" id="golden-note"></div>
       </div>
 
       <div class="card" id="card-weather">
@@ -188,13 +209,25 @@
     <div class="dir-compass-wrap">
       <svg id="dir-compass" viewBox="0 0 300 300" class="dir-compass">
         <circle cx="150" cy="150" r="140" class="dir-compass-ring"></circle>
-        <g id="dir-ticks"></g>
-        <g id="dir-cardinals"></g>
-        <line id="dir-needle" x1="150" y1="150" x2="150" y2="30" class="dir-needle"></line>
-        <circle id="dir-needle-tip" cx="150" cy="30" r="6" class="dir-needle-tip"></circle>
+        <g id="dir-face-rotator">
+          <g id="dir-ticks"></g>
+          <g id="dir-cardinals"></g>
+          <line id="dir-needle" x1="150" y1="150" x2="150" y2="30" class="dir-needle"></line>
+          <circle id="dir-needle-tip" cx="150" cy="30" r="6" class="dir-needle-tip"></circle>
+        </g>
+        <path d="M150 6 L142 24 L158 24 Z" class="dir-facing-mark"></path>
         <circle cx="150" cy="150" r="5" class="dir-compass-hub"></circle>
       </svg>
+      <div id="dir-facing-badge" class="dir-facing-badge" hidden>Facing the sun</div>
       <div id="dir-status-label" class="dir-status-label">--</div>
+    </div>
+
+    <div class="dir-compass-live">
+      <button id="dir-enable-compass" class="dir-enable-compass-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13 13l-4.5 2.5L11 11l4.5-2.5Z"/></svg>
+        Enable live compass
+      </button>
+      <p id="dir-compass-status" class="dir-compass-status">Turns the dial to match which way your phone is actually pointing, using its compass sensor. Phone only &mdash; a desktop browser has no compass hardware to read.</p>
     </div>
 
     <div class="dir-time-panel">
@@ -222,6 +255,14 @@
   <section id="log" class="tab-panel">
     <h2 class="section-h2"><svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h3l2-2h6l2 2h3v11H4z"/><circle cx="12" cy="13.5" r="3.2"/></svg>Shoot Log</h2>
     <div id="calib-status" class="calib-status"></div>
+
+    <div class="photo-score-block">
+      <label for="log-photo-input" class="photo-score-label">Sunset/sunrise photo (optional)</label>
+      <p class="photo-score-hint">Add a photo and the app reads its actual color &mdash; saturation and how much warm orange/pink tone is in it &mdash; and pre-fills the "Light quality - actually" rating below with its best guess. <strong>Use the raw, unedited photo straight off your camera or phone</strong> &mdash; filters, presets, and edited saturation/warmth change the actual pixels this reads, so an edited photo will score how it looks after editing, not how the sky really looked. It's a color heuristic, not real image recognition, so always double-check the rating before saving.</p>
+      <input type="file" accept="image/*" capture="environment" id="log-photo-input">
+      <div id="photo-score-result" class="photo-score-result" hidden></div>
+    </div>
+
     <form id="log-form" class="log-form">
       <input type="text" id="log-species" placeholder="Species / subject" required>
       <input type="text" id="log-gear" placeholder="Gear (e.g. R10 + RF 100-400mm)">
@@ -256,7 +297,7 @@
     <div class="table-scroll">
       <table class="log-table" id="log-table">
         <thead>
-          <tr><th>Date/Time</th><th>Species/Subject</th><th>Gear</th><th>Sun Phase</th><th>Bird Score</th><th>Light (actual)</th><th>Birds (actual)</th><th>Notes</th><th></th></tr>
+          <tr><th>Date/Time</th><th>Species/Subject</th><th>Gear</th><th>Sun Phase</th><th>Bird Score</th><th>Light (actual)</th><th>Photo Score</th><th>Birds (actual)</th><th>Notes</th><th></th></tr>
         </thead>
         <tbody></tbody>
       </table>

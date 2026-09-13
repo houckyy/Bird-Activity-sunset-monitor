@@ -367,6 +367,12 @@ main{
 .tier-good{color:#1f6b5c;}
 .tier-fair{color:#8a6a3d;}
 .tier-poor{color:#a8371f;}
+/* Golden Hour Intensity uses its own label set (Excellent/Good/Weak/Flat)
+   since it's a standalone score, not the sunrise/sunset quality tiers -
+   mapped to the same color language (tier-good is shared intentionally). */
+.tier-excellent{color:#c17a52;}
+.tier-weak{color:#8a6a3d;}
+.tier-flat{color:#a8371f;}
 .sub-stat{color:var(--muted);font-size:0.84rem;margin-bottom:10px;}
 
 .quality-row{display:flex;gap:22px;margin-bottom:16px;}
@@ -399,6 +405,60 @@ main{
 }
 .ring span{position:relative;font-size:0.85rem;font-weight:600;font-family:var(--font-display);font-variant-numeric:tabular-nums;}
 .ring-label{font-size:0.73rem;color:var(--muted);text-align:center;line-height:1.35;}
+.q-note{font-size:0.68rem;color:var(--accent);text-align:center;line-height:1.3;max-width:130px;}
+.q-note:empty{display:none;}
+
+/* Epic sunrise/sunset (score >=90, verified rare by Monte Carlo sweep -
+   roughly the top ~1% of realistic sky conditions) gets a warm pulsing
+   glow around its ring instead of the plain static border, plus a small
+   badge under the label - a visible "this one is worth going out for"
+   signal rather than just a bigger number. */
+.ring.ring-epic{
+  animation:epic-ring-glow 1.8s ease-in-out infinite;
+}
+@keyframes epic-ring-glow{
+  0%,100%{box-shadow:0 2px 6px -3px var(--shadow-ink-soft), 0 0 0px 0px color-mix(in srgb, var(--ring-color) 70%, transparent);}
+  50%{box-shadow:0 2px 6px -3px var(--shadow-ink-soft), 0 0 14px 4px color-mix(in srgb, var(--ring-color) 55%, transparent);}
+}
+.epic-badge{
+  font-size:0.68rem; font-weight:700; letter-spacing:0.01em;
+  color:#c17a52;
+  background:color-mix(in srgb, #c17a52 14%, transparent);
+  border:1px solid color-mix(in srgb, #c17a52 40%, transparent);
+  border-radius:999px;
+  padding:2px 9px;
+  animation:epic-badge-pop .5s cubic-bezier(.3,1.7,.35,1);
+}
+.epic-badge[hidden]{display:none;}
+@keyframes epic-badge-pop{
+  0%{transform:scale(0.5); opacity:0;}
+  70%{transform:scale(1.12); opacity:1;}
+  100%{transform:scale(1);}
+}
+@media (prefers-reduced-motion: reduce){
+  .ring.ring-epic{animation:none; box-shadow:0 2px 6px -3px var(--shadow-ink-soft), 0 0 10px 3px color-mix(in srgb, var(--ring-color) 55%, transparent);}
+  .epic-badge{animation:none;}
+}
+
+/* Same "epic" signal on the 7-day outlook, but static - no motion on 7
+   compact tiles at once, just a small flame mark next to the score. */
+.oscore-epic::after{
+  content:" \1F525";
+}
+
+/* Golden Hour Intensity card - a warm horizontal meter (same track/fill
+   pattern as the bird activity meter) plus a small color swatch approximating
+   the estimated correlated color temperature, so the Kelvin number reads as
+   an actual color at a glance instead of just a figure. */
+.golden-meter-fill{background:linear-gradient(90deg,#8a6a3d,#c17a52,#e8a662);}
+.golden-cct-row{display:flex;align-items:center;gap:7px;margin-bottom:4px;}
+.golden-cct-swatch{
+  display:inline-block; width:13px; height:13px; border-radius:50%;
+  border:1px solid var(--panel-border);
+  background:#e8e8e8;
+  flex-shrink:0;
+}
+#card-golden .q-note{text-align:left;max-width:none;}
 
 .outlook-grid{display:grid;grid-template-columns:1fr;gap:12px;margin-top:16px;}
 .outlook-day{background:var(--panel);border:1.5px solid var(--panel-border);border-radius:14px 6px 14px 6px;padding:14px 16px;animation:card-in .4s cubic-bezier(.2,.8,.2,1) both;position:relative;overflow:hidden;box-shadow:0 1px 0 rgba(255,255,255,0.4) inset;}
@@ -933,6 +993,7 @@ main{
 }
 .dir-compass{width:100%;max-width:320px;height:auto;}
 .dir-compass-ring{fill:var(--panel-2);stroke:var(--panel-border);stroke-width:2;}
+#dir-face-rotator{transform-origin:150px 150px;transition:transform 0.12s linear;}
 .dir-tick{stroke:var(--panel-border);stroke-width:2;}
 .dir-tick-major{stroke:var(--muted);stroke-width:3;}
 .dir-cardinal{
@@ -1015,3 +1076,56 @@ main{
   cursor:pointer;
 }
 .dir-slider-hint{margin:10px 0 0 0;font-size:0.74rem;color:var(--muted);line-height:1.4;}
+
+.dir-facing-mark{fill:var(--rust);}
+.dir-facing-badge{
+  position:absolute;
+  top:-6px;
+  left:50%;
+  transform:translate(-50%,-100%);
+  background:var(--moss);
+  color:var(--panel);
+  font-size:0.72rem;
+  font-weight:650;
+  padding:4px 10px;
+  border-radius:8px 3px 8px 3px;
+  white-space:nowrap;
+}
+.dir-compass-wrap{position:relative;}
+.dir-compass-live{
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  margin-bottom:16px;
+  text-align:center;
+}
+.dir-enable-compass-btn{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:9px 16px;
+  border-radius:10px 4px 10px 4px;
+  border:1px solid var(--panel-border);
+  background:var(--panel);
+  color:var(--moss);
+  font-weight:650;font-size:0.85rem;
+  cursor:pointer;
+}
+.dir-enable-compass-btn svg{width:18px;height:18px;}
+.dir-enable-compass-btn.is-live{background:var(--moss);color:var(--panel);border-color:var(--moss);}
+.dir-compass-status{margin:0;font-size:0.74rem;color:var(--muted);max-width:44ch;line-height:1.4;}
+
+/* ---------- Sunset photo scoring (Shoot Log) ---------- */
+.photo-score-block{
+  background:var(--panel-2);
+  border:1px solid var(--panel-border);
+  border-radius:10px 3px 10px 3px;
+  padding:12px 14px;
+  margin-bottom:14px;
+}
+.photo-score-label{display:block;font-size:0.78rem;font-weight:650;color:var(--text);margin-bottom:4px;}
+.photo-score-hint{margin:0 0 10px 0;font-size:0.72rem;color:var(--muted);line-height:1.4;}
+.photo-score-result{
+  margin-top:10px;
+  display:flex;align-items:center;gap:12px;
+  flex-wrap:wrap;
+}
+.photo-score-result img{width:64px;height:64px;object-fit:cover;border-radius:6px 2px 6px 2px;border:1px solid var(--panel-border);}
+.photo-score-text{font-size:0.8rem;color:var(--text);}
+.photo-score-text strong{color:var(--accent);}
