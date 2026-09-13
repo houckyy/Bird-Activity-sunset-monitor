@@ -1,0 +1,18 @@
+{
+  "name": "raylight-ios-wrapper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capacitor iOS wrapper around the Photography & Bird Activity Monitor web app, built for App Store submission via GitHub Actions macOS runners (no local Mac required).",
+  "scripts": {
+    "prep-web": "node prep-web.js",
+    "cap:add-ios": "npx cap add ios",
+    "cap:sync": "npm run prep-web && npx cap sync ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/ios": "^8.5.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.2"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "raylight-android-wrapper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capacitor Android wrapper around the Photography & Bird Activity Monitor web app, built and signed for the Play Store via GitHub Actions ubuntu runners (no Mac and no Android Studio install required).",
+  "scripts": {
+    "prep-web": "node prep-web.js",
+    "cap:add-android": "npx cap add android",
+    "cap:sync": "npm run prep-web && npx cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/android": "^8.5.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.2"
+  }
+}

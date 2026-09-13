@@ -1,20 +1,24 @@
 :root{
-  --bg:#efe4cc;
-  --bg-2:#e4d5ae;
-  --panel:#fbf6e7;
-  --panel-2:#f2e8cf;
-  --panel-border:#c9b688;
-  --text:#2c2418;
-  --muted:#6b5e49;
-  --accent:#9c6a14;      /* Ink gold - golden hour / "great" */
-  --accent-soft:#c99a3a;
+  /* ---- Raylight brand system: deep navy / terracotta / cream paper ---- */
+  --navy:#1c2d4f;
+  --terracotta:#c17a52;
+  --terracotta-soft:#d9a37c;
+  --bg:#f3e8d2;
+  --bg-2:#ead9b2;
+  --panel:#fbf6ea;
+  --panel-2:#f2e7cc;
+  --panel-border:#cdb98c;
+  --text:#1c2d4f;
+  --muted:#5c6a86;
+  --accent:#c17a52;      /* Terracotta - sun accent / "great" */
+  --accent-soft:#d9a37c;
   --blue:#3d6e78;        /* Dusk teal-blue - blue hour */
   --moss:#1f6b5c;        /* Ink teal - primary / "good" */
   --rust:#a8371f;        /* Ink rust - poor / warning */
-  --amber:#9c6a14;       /* Ink gold */
-  --graphite:#3a3226;
-  --shadow-ink:rgba(44,36,24,0.20);
-  --shadow-ink-soft:rgba(44,36,24,0.12);
+  --amber:#c17a52;
+  --graphite:#1c2d4f;
+  --shadow-ink:rgba(28,45,79,0.20);
+  --shadow-ink-soft:rgba(28,45,79,0.12);
   --tabbar-h:66px;
   --font-body:"Inter","Segoe UI",-apple-system,Roboto,Helvetica,Arial,sans-serif;
   --font-display:"Fraunces","Iowan Old Style","Georgia",serif;
@@ -28,8 +32,8 @@ body{
   margin:0;
   position:relative;
   background:
-    radial-gradient(1200px 600px at 15% -10%, var(--mood-a, rgba(156,106,20,0.08)), transparent 60%),
-    radial-gradient(900px 500px at 100% 0%, var(--mood-b, rgba(31,107,92,0.05)), transparent 55%),
+    radial-gradient(1200px 600px at 15% -10%, var(--mood-a, rgba(193,122,82,0.09)), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, var(--mood-b, rgba(28,45,79,0.05)), transparent 55%),
     var(--bg);
   color:var(--text);
   min-height:100vh;
@@ -39,18 +43,19 @@ body{
   overflow-x:hidden;
 }
 
-/* Faint contour-map texture, like topo lines penciled onto a field map. Pure
-   decoration, sits behind everything, never intercepts taps. */
+/* Raylight watermark - the brand's bird-and-sunburst mark, tiled very faintly
+   across the paper. Pure decoration, sits behind everything, never
+   intercepts taps. */
 body::before{
   content:"";
   position:fixed;
   inset:0;
   pointer-events:none;
   z-index:0;
-  opacity:0.6;
-  background-image:
-    repeating-radial-gradient(circle at 12% 8%, transparent 0, transparent 38px, rgba(44,36,24,0.045) 39px, transparent 40px, transparent 78px, rgba(44,36,24,0.03) 79px, transparent 80px),
-    repeating-radial-gradient(circle at 92% 85%, transparent 0, transparent 46px, rgba(156,106,20,0.035) 47px, transparent 48px, transparent 96px, rgba(156,106,20,0.02) 97px, transparent 98px);
+  opacity:0.2;
+  background-image:url("assets/raylight-pattern-tile.png");
+  background-repeat:repeat;
+  background-size:210px 210px;
 }
 /* Fine grain, like paper tooth - breaks up flat digital color and keeps the
    paper from reading as a smooth screenshot-of-a-gradient. */
@@ -76,7 +81,8 @@ body::after{
   animation:intro-hold 1.5s ease forwards;
 }
 #intro-splash .intro-mark{
-  width:52px;height:52px;
+  width:76px;height:76px;
+  object-fit:contain;
   animation:intro-mark-in 0.9s cubic-bezier(.2,.9,.25,1.2) both;
 }
 #intro-splash .intro-text{
@@ -123,9 +129,22 @@ a:visited{color:var(--moss);}
 
 /* ---------- Mobile-first base layout (this IS the primary target) ---------- */
 
+/* Always-visible "where am I" strip, pinned above everything else so the
+   active location reads at a glance without opening the location box below -
+   the whole point of a field tool is knowing where its numbers apply to. */
+.top-location-bar{
+  position:sticky; top:0; z-index:50;
+  display:flex; align-items:center; gap:6px;
+  padding:7px 16px;
+  padding-top:calc(7px + env(safe-area-inset-top));
+  background:var(--moss); color:var(--panel);
+  font-size:0.78rem; font-weight:600; letter-spacing:0.01em;
+}
+.top-location-bar svg{width:14px;height:14px;flex-shrink:0;}
+.top-location-bar span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
 .app-header{
   padding:16px 16px 20px;
-  padding-top:calc(16px + env(safe-area-inset-top));
   background:linear-gradient(180deg, rgba(255,255,255,0.25), transparent);
   position:relative;
 }
@@ -135,51 +154,31 @@ a:visited{color:var(--moss);}
   position:absolute;
   left:16px; right:16px; bottom:0;
   height:6px;
-  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 6' preserveAspectRatio='none'><path d='M0 3 Q 6 0 12 3 T 24 3 T 36 3 T 48 3 T 60 3 T 72 3 T 84 3 T 96 3 T 108 3 T 120 3' fill='none' stroke='%23a8946a' stroke-width='1.4'/></svg>");
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 6' preserveAspectRatio='none'><path d='M0 3 Q 6 0 12 3 T 24 3 T 36 3 T 48 3 T 60 3 T 72 3 T 84 3 T 96 3 T 108 3 T 120 3' fill='none' stroke='%23c17a52' stroke-width='1.4'/></svg>");
   background-repeat:repeat-x;
   background-size:60px 6px;
   opacity:0.9;
 }
-/* A single bird drifts across the header on a long, lazy loop - a quiet
-   nod to the app's subject, never distracting. */
-.drift-bird{
-  position:absolute;
-  top:14px; left:-30px;
-  width:16px;height:16px;
-  color:var(--moss);
-  opacity:0;
-  pointer-events:none;
-  animation:drift-across 24s ease-in-out infinite;
-  animation-delay:2s;
-}
-@keyframes drift-across{
-  0%{opacity:0; transform:translate(0,0) scale(0.9);}
-  6%{opacity:0.5;}
-  46%{opacity:0.38; transform:translate(70vw,-10px) scale(1.05);}
-  58%{opacity:0;}
-  100%{opacity:0; transform:translate(70vw,-10px) scale(1.05);}
-}
-@media (min-width:820px){
-  .drift-bird{top:20px;}
-}
 .brand{display:flex;align-items:flex-start;gap:12px;}
+/* A clean, static circular badge instead of the old organic-blob mark that
+   rotated on a loop - a logo should sit still and read clearly, not wobble. */
 .brand-mark{
   flex-shrink:0;
-  width:40px;height:40px;
-  border-radius:60% 40% 55% 45% / 45% 55% 40% 60%;
+  width:76px;height:76px;
+  border-radius:50%;
   display:flex;align-items:center;justify-content:center;
-  background:linear-gradient(155deg, rgba(31,107,92,0.16), rgba(156,106,20,0.14));
-  border:1px solid var(--panel-border);
-  color:var(--moss);
+  background:radial-gradient(circle at 35% 30%, rgba(193,122,82,0.26), rgba(28,45,79,0.1));
+  border:2px solid color-mix(in srgb, var(--terracotta) 55%, var(--panel-border));
+  box-shadow:0 4px 14px -6px var(--shadow-ink);
+  color:var(--navy);
   margin-top:1px;
-  transform:rotate(-6deg);
-  animation:leaf-sway 7s ease-in-out infinite;
+  animation:badge-breathe 6s ease-in-out infinite;
 }
-@keyframes leaf-sway{
-  0%,100%{transform:rotate(-6deg);}
-  50%{transform:rotate(2deg);}
+@keyframes badge-breathe{
+  0%,100%{transform:scale(1);}
+  50%{transform:scale(1.035);}
 }
-.brand-mark svg{width:20px;height:20px;}
+.brand-mark img{width:60px;height:60px;object-fit:contain;}
 .app-header h1{
   margin:0 0 4px 0;
   font-family:var(--font-display);
@@ -203,17 +202,42 @@ a:visited{color:var(--moss);}
   padding:3px 9px 3px 7px;
   transform:rotate(-2deg);
   margin-bottom:12px;
-  background:rgba(156,106,20,0.07);
+  background:rgba(193,122,82,0.08);
 }
 .field-stamp svg{width:11px;height:11px;flex-shrink:0;}
 .location-box{width:100%;}
 .location-box label{font-size:0.7rem;color:var(--muted);display:block;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;}
 .loc-row{display:flex;gap:6px;}
+.loc-row-wrap{position:relative;}
 .loc-row input{flex:1;min-width:0;padding:11px 12px;background:var(--panel);border:1px solid var(--panel-border);color:var(--text);border-radius:10px 4px 10px 4px;font-size:0.95rem;}
 .loc-row input:focus{outline:none;border-color:var(--moss);}
 .loc-row button{padding:11px 14px;border-radius:4px 10px 4px 10px;border:1px solid var(--panel-border);background:var(--panel-2);color:var(--text);cursor:pointer;font-size:0.85rem;white-space:nowrap;transition:border-color .15s ease, background .15s ease, transform .1s ease;}
 .loc-row button:active{border-color:var(--moss);background:var(--panel);transform:scale(.97) rotate(-1deg);}
 .loc-label{margin-top:8px;font-size:0.78rem;color:var(--muted);}
+/* Town-name autocomplete dropdown, anchored under the input specifically
+   (not the whole row) so it doesn't cover the GPS/Set buttons. */
+.loc-suggestions{
+  position:absolute; top:calc(100% + 4px); left:0;
+  width:100%; max-width:260px;
+  background:var(--panel); border:1px solid var(--panel-border);
+  border-radius:8px; box-shadow:0 10px 24px -10px var(--shadow-ink);
+  z-index:30; overflow:hidden;
+}
+.loc-suggestion{
+  display:block; width:100%; text-align:left;
+  padding:9px 12px; background:none; border:none; border-bottom:1px solid var(--panel-border);
+  color:var(--text); font-size:0.85rem; cursor:pointer;
+}
+.loc-suggestion:last-child{border-bottom:none;}
+.loc-suggestion:hover, .loc-suggestion.is-active{background:var(--panel-2); color:var(--navy);}
+.loc-suggestion small{display:block; color:var(--muted); font-size:0.72rem; margin-top:1px;}
+/* Feedback for the location search specifically, right where the user is
+   looking - the shared #status-msg lives far down the Dashboard tab and is
+   invisible from the other tabs entirely, which made it look like setting a
+   location silently did nothing. */
+.loc-status{margin-top:8px; font-size:0.78rem; color:var(--muted);}
+.loc-status.is-error{color:var(--rust);}
+.loc-status.is-ok{color:var(--moss);}
 
 /* Bottom tab bar - the primary nav on a phone */
 .tabs{
@@ -221,7 +245,9 @@ a:visited{color:var(--moss);}
   left:0;right:0;bottom:0;
   display:flex;
   gap:0;
-  background:var(--bg-2);
+  background:rgba(234,217,178,0.6);
+  backdrop-filter:blur(6px);
+  -webkit-backdrop-filter:blur(6px);
   border-top:1px solid var(--panel-border);
   padding-bottom:env(safe-area-inset-bottom);
   z-index:50;
@@ -337,7 +363,7 @@ main{
   font-variant-numeric:tabular-nums;
 }
 .big-stat.small{font-size:1.1rem;}
-.tier-great{color:#9c6a14;}
+.tier-great{color:#c17a52;}
 .tier-good{color:#1f6b5c;}
 .tier-fair{color:#8a6a3d;}
 .tier-poor{color:#a8371f;}
@@ -354,7 +380,7 @@ main{
   position:relative;
   flex-shrink:0;
   box-shadow:0 2px 6px -3px var(--shadow-ink-soft);
-  transition:--p 1s cubic-bezier(.2,.8,.2,1);
+  transition:--p .9s cubic-bezier(.3,1.7,.35,1);
 }
 /* A slow-turning dashed ring around each dial, like a compass bezel */
 .ring::after{
@@ -369,7 +395,7 @@ main{
 .ring::before{
   content:"";position:absolute;inset:7px;border-radius:50%;
   background:var(--panel);
-  box-shadow:0 1px 3px rgba(44,36,24,0.18) inset;
+  box-shadow:0 1px 3px rgba(28,45,79,0.18) inset;
 }
 .ring span{position:relative;font-size:0.85rem;font-weight:600;font-family:var(--font-display);font-variant-numeric:tabular-nums;}
 .ring-label{font-size:0.73rem;color:var(--muted);text-align:center;line-height:1.35;}
@@ -436,14 +462,14 @@ main{
   content:"";
   position:absolute; inset:0;
   opacity:0.6;
-  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 14' preserveAspectRatio='none'><path d='M0 11 L8 6 L16 10 L26 4 L34 9 L44 5 L54 10 L64 3 L74 8 L84 5 L92 9 L100 6 L100 14 L0 14 Z' fill='rgba(44,36,24,0.07)'/></svg>");
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 14' preserveAspectRatio='none'><path d='M0 11 L8 6 L16 10 L26 4 L34 9 L44 5 L54 10 L64 3 L74 8 L84 5 L92 9 L100 6 L100 14 L0 14 Z' fill='rgba(28,45,79,0.07)'/></svg>");
   background-size:100% 100%;
   pointer-events:none;
 }
 .meter-fill{
   height:100%;width:0%;
   background:linear-gradient(90deg,var(--rust),var(--accent-soft),var(--moss));
-  transition:width .6s cubic-bezier(.2,.8,.2,1);
+  transition:width .85s cubic-bezier(.3,1.6,.35,1);
   position:relative;
   overflow:hidden;
   box-shadow:inset 0 1px 0 rgba(255,255,255,0.4);
@@ -459,8 +485,6 @@ main{
   padding:3px 9px; border-radius:20px 4px 20px 4px;
   border:1px solid var(--panel-border);
 }
-.bird-source.is-live{color:var(--accent); border-color:color-mix(in srgb, var(--accent) 50%, var(--panel-border));}
-.bird-source.is-live::before{content:"●"; color:var(--accent); font-size:0.6rem;}
 .bird-source.is-model::before{content:"~"; color:var(--muted);}
 
 .factor-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
@@ -529,6 +553,14 @@ main{
 .log-form{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;}
 .log-form input{width:100%;padding:12px 12px;background:var(--panel);border:1px solid var(--panel-border);color:var(--text);border-radius:10px 4px 10px 4px;font-size:0.95rem;}
 .log-form input:focus{outline:none;border-color:var(--moss);}
+.log-rating-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 2px;}
+.log-rating-row label{font-size:0.82rem;color:var(--muted);}
+.log-rating-row select{padding:8px 10px;background:var(--panel);border:1px solid var(--panel-border);color:var(--text);border-radius:8px 3px 8px 3px;font-size:0.85rem;}
+.log-rating-row select:focus{outline:none;border-color:var(--moss);}
+.log-rating-hint{margin:0;font-size:0.72rem;color:var(--muted);}
+/* Calibration readout above the Shoot Log form - deliberately plain text,
+   not a stat tile, since it's a status message, not a headline number. */
+.calib-status{margin-bottom:12px;padding:10px 12px;background:var(--panel-2);border:1px solid var(--panel-border);border-radius:8px 3px 8px 3px;font-size:0.78rem;color:var(--muted);display:flex;flex-direction:column;gap:3px;}
 .log-form button{
   width:100%;padding:13px 16px;
   border-radius:16px 5px 16px 5px;border:1.5px solid var(--text);
@@ -547,22 +579,6 @@ main{
 .log-table th,.log-table td{text-align:left;padding:8px 9px;border-bottom:1px dotted var(--panel-border);}
 .log-table th{color:var(--muted);font-weight:600;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;}
 .log-table button{background:none;border:none;color:var(--rust);cursor:pointer;font-size:1.1rem;padding:4px 8px;}
-
-.ebird-key-row{display:flex; gap:8px; margin:14px 0 8px; flex-wrap:wrap;}
-.ebird-key-row input{
-  flex:1; min-width:200px; padding:11px 12px;
-  background:var(--panel); border:1px solid var(--panel-border); color:var(--text);
-  border-radius:10px 4px 10px 4px; font-size:0.9rem; font-family:monospace;
-}
-.ebird-key-row input:focus{outline:none; border-color:var(--moss);}
-.ebird-key-row button{
-  padding:11px 18px; border-radius:10px 4px 10px 4px; border:1.5px solid var(--text);
-  background:var(--moss); color:var(--panel);
-  font-weight:650; cursor:pointer; box-shadow:3px 3px 0 var(--panel-border); transition:transform .12s ease, box-shadow .12s ease;
-}
-.ebird-key-row button:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--panel-border);}
-.ebird-key-status{color:var(--muted); font-size:0.82rem; margin:0 0 24px;}
-.ebird-key-status.is-live{color:var(--accent);}
 
 #about-content{color:var(--text);font-size:0.9rem;line-height:1.65;}
 #about-content h3{
@@ -583,12 +599,8 @@ main{
 #about-content a{color:var(--moss);}
 #about-content strong{color:var(--accent);font-weight:650;}
 
-/* ---------- Terrain / activity map ---------- */
-.map-toolbar{
-  display:flex; flex-wrap:wrap; gap:10px;
-  align-items:center; justify-content:space-between;
-  margin:16px 0 12px;
-}
+/* Reused by the temperature-unit and sound-effect toggles in the Units
+   section - a small pill-shaped segmented control. */
 .map-layer-toggle{
   display:flex; gap:0;
   background:var(--bg-2);
@@ -604,72 +616,20 @@ main{
   transition:background .18s ease, color .18s ease;
 }
 .map-layer-btn.active{background:var(--moss); color:var(--panel);}
-.map-refresh-btn{
-  display:flex; align-items:center; gap:7px;
-  border:1px solid var(--panel-border); background:var(--panel-2); color:var(--text);
-  border-radius:10px 4px 10px 4px; padding:9px 13px; font-size:0.8rem; font-weight:600;
-  cursor:pointer; transition:transform .1s ease, border-color .15s ease;
-}
-.map-refresh-btn svg{width:14px;height:14px;}
-.map-refresh-btn:active{transform:scale(.97); border-color:var(--moss);}
-.map-refresh-btn.is-loading svg{animation:spin 0.9s linear infinite;}
 
-.map-container{
-  position:relative;
-  width:100%;
-  height:min(62vh, 460px);
-  border-radius:16px 6px 16px 6px;
-  overflow:hidden;
-  border:1.5px solid var(--panel-border);
-  box-shadow:0 8px 18px -14px var(--shadow-ink);
+/* Settings tab: one labeled row per toggle, and a full-width solo action
+   button styled like the Shoot Log's paired action buttons. */
+.settings-block{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:10px 0;border-bottom:1px dotted var(--panel-border);}
+.settings-block:last-of-type{border-bottom:none;}
+.settings-label{font-size:0.88rem;font-weight:650;color:var(--text);}
+.log-actions-btn-solo{
+  display:block; width:100%; padding:12px 10px; margin-top:4px;
+  border-radius:10px 4px 10px 4px; border:1px solid var(--panel-border);
+  background:var(--panel-2); color:var(--text); cursor:pointer;
+  font-size:0.88rem; font-weight:650;
+  transition:border-color .15s ease, transform .1s ease;
 }
-#leaflet-map{width:100%; height:100%; background:var(--bg-2);}
-.map-loading{
-  position:absolute; inset:0;
-  display:flex; align-items:center; justify-content:center;
-  background:rgba(239,228,204,0.9);
-  color:var(--text);
-  font-size:0.85rem;
-  z-index:5;
-  pointer-events:none;
-  transition:opacity .3s ease;
-}
-.map-loading[hidden]{display:none;}
-
-.map-legend{margin-top:12px;}
-.legend-swatches{
-  display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px;
-  font-size:0.78rem; color:var(--muted);
-}
-.legend-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:2px;}
-.map-status{color:var(--muted); font-size:0.8rem; margin:8px 0 0;}
-
-/* Grid sample markers: a pulse-in on first render, like radar contacts
-   appearing. Leaflet's default popup is re-skinned to match the journal
-   palette instead of its stock white box. */
-.grid-marker{
-  border-radius:50%;
-  border:2px solid rgba(255,255,255,0.85);
-  box-shadow:0 0 0 3px rgba(44,36,24,0.25);
-  animation:grid-marker-in .5s cubic-bezier(.3,1.4,.4,1) both;
-}
-@keyframes grid-marker-in{
-  0%{opacity:0; transform:scale(0.2);}
-  70%{opacity:1;}
-  100%{opacity:1; transform:scale(1);}
-}
-.leaflet-popup-content-wrapper{
-  background:var(--panel); color:var(--text);
-  border:1.5px solid var(--panel-border);
-  border-radius:12px 4px 12px 4px;
-  box-shadow:0 8px 18px -10px var(--shadow-ink);
-}
-.leaflet-popup-tip{background:var(--panel); border:1px solid var(--panel-border);}
-.leaflet-popup-content{font-family:var(--font-body); font-size:0.85rem; margin:10px 12px;}
-.leaflet-popup-content b{font-family:var(--font-display); font-size:0.95rem;}
-.leaflet-container a.leaflet-popup-close-button{color:var(--muted);}
-.leaflet-control-attribution{background:rgba(239,228,204,0.85) !important; color:var(--muted) !important;}
-.leaflet-control-attribution a{color:var(--moss) !important;}
+.log-actions-btn-solo:active{border-color:var(--moss);transform:scale(.98);}
 
 /* ---------- Wider screens: tablet/desktop enhancement ---------- */
 @media (min-width:820px){
@@ -747,6 +707,311 @@ main{
   .log-table{min-width:0;}
 
   #about-content{max-width:760px;}
-
-  .map-container{height:560px;}
 }
+
+/* ---------- Sensory feedback: ripple, pop, shutter flash, particles ---------- */
+
+/* Ink-blot ripple: a small expanding + fading circle spawned at the touch
+   point on every tactile button - the visual half of the haptic buzz.
+   Buttons that use it need position:relative + overflow:hidden so it's
+   clipped to the button's own shape rather than spilling past its edges. */
+.refresh-btn, .map-layer-btn, .loc-row button,
+.log-form button, .log-actions button, .tab-btn, .log-actions-btn-solo{
+  position:relative; overflow:hidden;
+}
+.ink-ripple{
+  position:absolute;
+  border-radius:50%;
+  background:radial-gradient(circle, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.18) 45%, transparent 72%);
+  transform:scale(0);
+  opacity:1;
+  pointer-events:none;
+  animation:ink-ripple-out .55s cubic-bezier(.2,.7,.3,1) forwards;
+}
+@keyframes ink-ripple-out{
+  0%{transform:scale(0); opacity:0.9;}
+  100%{transform:scale(1); opacity:0;}
+}
+
+/* A quick overshoot scale-bounce for anything that just "landed" a new
+   value - numbers, dials, or a whole card after a successful refresh. */
+.value-pop{animation:value-pop-bounce .5s cubic-bezier(.3,1.7,.4,1);}
+@keyframes value-pop-bounce{
+  0%{transform:scale(1);}
+  35%{transform:scale(1.09);}
+  65%{transform:scale(0.98);}
+  100%{transform:scale(1);}
+}
+
+/* Camera-shutter flash: a quick warm-white flash across the whole screen on
+   a successful data refresh - literal camera-shutter feedback for a
+   photography app, paired with a two-click shutter sound. Pure overlay,
+   never intercepts taps. */
+#shutter-flash{
+  position:fixed; inset:0; z-index:998;
+  background:radial-gradient(circle at 50% 45%, rgba(255,252,240,0.95), rgba(255,252,240,0.0) 72%);
+  opacity:0;
+  pointer-events:none;
+}
+#shutter-flash.firing{animation:shutter-flash-anim .5s ease-out;}
+@keyframes shutter-flash-anim{
+  0%{opacity:0;}
+  12%{opacity:0.85;}
+  100%{opacity:0;}
+}
+@media (prefers-reduced-motion: reduce){
+  #shutter-flash{display:none;}
+}
+
+/* Small tier-colored particles that burst outward from the bird meter on a
+   successful, live (non-cached) refresh - a little celebratory "confetti"
+   moment sized for a phone screen, not a full-screen takeover. */
+.burst-particle{
+  position:fixed;
+  width:7px; height:7px;
+  border-radius:50%;
+  pointer-events:none;
+  z-index:997;
+  animation:burst-fly .7s cubic-bezier(.15,.7,.3,1) forwards;
+}
+@keyframes burst-fly{
+  0%{transform:translate(0,0) scale(1); opacity:1;}
+  100%{transform:translate(var(--bx,0), var(--by,0)) scale(0.3); opacity:0;}
+}
+@media (prefers-reduced-motion: reduce){
+  .burst-particle{display:none;}
+  .value-pop{animation:none;}
+}
+
+/* ---------- In-app help assistant ---------- */
+/* A round floating button, always reachable regardless of which tab is
+   active (it lives outside <main>), that opens a small chat-style panel.
+   This is a local, offline knowledge-base lookup over this app's own
+   documented features - not a live/general AI - and says so plainly in
+   its own header rather than letting the "Ask" framing imply more than
+   it delivers. */
+.ask-fab{
+  position:fixed;
+  right:16px;
+  bottom:calc(var(--tabbar-h) + 16px + env(safe-area-inset-bottom));
+  width:52px; height:52px;
+  border-radius:50% 42% 50% 42%;
+  border:1px solid var(--panel-border);
+  background:var(--terracotta);
+  color:var(--panel);
+  box-shadow:0 6px 16px rgba(28,45,79,0.28);
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer;
+  z-index:400;
+  transition:transform .15s ease, box-shadow .15s ease;
+}
+.ask-fab svg{width:24px;height:24px;}
+.ask-fab:active{transform:scale(.94);}
+.ask-fab[aria-expanded="true"]{background:var(--navy);}
+
+.ask-overlay{
+  position:fixed; inset:0; z-index:398;
+  background:rgba(28,45,79,0.32);
+  backdrop-filter:blur(1.5px);
+  -webkit-backdrop-filter:blur(1.5px);
+}
+/* .ask-panel sets display:flex unconditionally below, which (being an
+   author rule) overrides the browser's default [hidden]{display:none}
+   UA style - same footgun the stale-banner rule above already accounts
+   for. Without this, setting .hidden = true in JS stops the panel from
+   being announced to assistive tech and removes it from tab order, but
+   leaves it fully visible and still intercepting taps underneath. */
+.ask-panel[hidden], .ask-overlay[hidden]{display:none;}
+
+.ask-panel{
+  position:fixed;
+  left:12px; right:12px;
+  bottom:calc(var(--tabbar-h) + 78px + env(safe-area-inset-bottom));
+  max-width:460px;
+  margin:0 auto;
+  max-height:min(66vh, 560px);
+  display:flex; flex-direction:column;
+  background:var(--panel);
+  border:1px solid var(--panel-border);
+  border-radius:16px 6px 16px 6px;
+  box-shadow:0 14px 34px rgba(28,45,79,0.32);
+  z-index:399;
+  overflow:hidden;
+  animation:ask-panel-in .22s cubic-bezier(.2,.8,.2,1);
+}
+@keyframes ask-panel-in{
+  0%{opacity:0; transform:translateY(14px) scale(.97);}
+  100%{opacity:1; transform:translateY(0) scale(1);}
+}
+.ask-panel-header{
+  display:flex; align-items:flex-start; justify-content:space-between; gap:10px;
+  padding:14px 14px 12px;
+  border-bottom:1px solid var(--panel-border);
+  background:var(--panel-2);
+  flex-shrink:0;
+}
+.ask-panel-title{font-family:var(--font-display);font-weight:650;color:var(--navy);font-size:1.02rem;}
+.ask-panel-sub{color:var(--muted);font-size:0.74rem;margin-top:4px;line-height:1.4;}
+.ask-close{
+  border:none; background:none; color:var(--muted); cursor:pointer;
+  padding:4px; flex-shrink:0; border-radius:50%;
+}
+.ask-close svg{width:18px;height:18px;display:block;}
+.ask-messages{
+  flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  padding:14px; display:flex; flex-direction:column; gap:10px;
+}
+.ask-msg{
+  max-width:86%;
+  padding:9px 12px;
+  border-radius:12px 4px 12px 4px;
+  font-size:0.86rem; line-height:1.5;
+}
+.ask-msg-user{
+  align-self:flex-end;
+  background:var(--moss); color:var(--panel);
+  border-radius:4px 12px 4px 12px;
+}
+.ask-msg-bot{
+  align-self:flex-start;
+  background:var(--panel-2); color:var(--text);
+  border:1px solid var(--panel-border);
+}
+.ask-suggestions{
+  display:flex; flex-wrap:wrap; gap:6px;
+  padding:0 14px 12px;
+  flex-shrink:0;
+}
+.ask-suggestion{
+  border:1px solid var(--panel-border);
+  background:var(--bg-2); color:var(--text);
+  font-size:0.72rem; font-weight:650;
+  padding:6px 10px; border-radius:10px 3px 10px 3px;
+  cursor:pointer;
+}
+.ask-form{
+  display:flex; gap:8px;
+  padding:10px 12px;
+  border-top:1px solid var(--panel-border);
+  flex-shrink:0;
+}
+.ask-form input{
+  flex:1; padding:10px 12px;
+  background:var(--bg); border:1px solid var(--panel-border);
+  border-radius:10px 4px 10px 4px;
+  color:var(--text); font-size:0.86rem;
+}
+.ask-form input:focus{outline:none;border-color:var(--moss);}
+.ask-form button{
+  padding:10px 16px;
+  border-radius:10px 4px 10px 4px;
+  border:1px solid var(--panel-border);
+  background:var(--moss); color:var(--panel);
+  font-weight:650; font-size:0.86rem;
+  cursor:pointer;
+}
+@media (min-width:640px){
+  .ask-panel{left:auto; right:16px; width:400px;}
+}
+
+/* ---------- Direction (sun compass) tab ---------- */
+.dir-readouts{display:flex;gap:10px;margin-bottom:16px;}
+.dir-stat-box{
+  flex:1;
+  background:var(--panel-2);
+  border:1px solid var(--panel-border);
+  border-radius:10px 3px 10px 3px;
+  padding:10px 14px;
+}
+.dir-stat-label{font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:3px;}
+.dir-stat-value{font-family:var(--font-display);font-size:1.4rem;color:var(--text);font-weight:600;}
+
+.dir-compass-wrap{
+  display:flex;flex-direction:column;align-items:center;gap:10px;
+  margin:0 auto 18px auto;
+  max-width:340px;
+}
+.dir-compass{width:100%;max-width:320px;height:auto;}
+.dir-compass-ring{fill:var(--panel-2);stroke:var(--panel-border);stroke-width:2;}
+.dir-tick{stroke:var(--panel-border);stroke-width:2;}
+.dir-tick-major{stroke:var(--muted);stroke-width:3;}
+.dir-cardinal{
+  fill:var(--text);
+  font-family:var(--font-body);
+  font-weight:650;
+  font-size:16px;
+  text-anchor:middle;
+  dominant-baseline:middle;
+}
+.dir-cardinal-n{fill:var(--rust);}
+.dir-needle{
+  stroke:var(--accent);
+  stroke-width:4;
+  stroke-linecap:round;
+  transition:transform 0.35s ease;
+  transform-origin:150px 150px;
+}
+.dir-needle.is-below-horizon{stroke:var(--blue);}
+.dir-needle-tip{fill:var(--accent);transition:transform 0.35s ease;transform-origin:150px 150px;}
+.dir-needle-tip.is-below-horizon{fill:var(--blue);}
+.dir-compass-hub{fill:var(--text);}
+.dir-status-label{font-size:0.82rem;color:var(--muted);text-align:center;}
+
+.dir-time-panel{
+  background:var(--panel-2);
+  border:1px solid var(--panel-border);
+  border-radius:12px 4px 12px 4px;
+  padding:14px 16px 16px 16px;
+}
+.dir-date-row{
+  display:flex;align-items:center;justify-content:center;gap:10px;
+  margin-bottom:12px;
+}
+.dir-datetime-label{
+  font-family:var(--font-display);
+  font-weight:600;
+  font-size:1rem;
+  color:var(--text);
+  min-width:170px;
+  text-align:center;
+}
+.dir-arrow-btn,.dir-now-btn{
+  width:36px;height:36px;
+  border-radius:50%;
+  border:1px solid var(--panel-border);
+  background:var(--panel);
+  color:var(--text);
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;
+  flex-shrink:0;
+}
+.dir-arrow-btn svg,.dir-now-btn svg{width:18px;height:18px;}
+.dir-now-btn{color:var(--moss);border-color:color-mix(in srgb, var(--moss) 45%, var(--panel-border));}
+.dir-slider-row{display:flex;align-items:center;gap:10px;}
+.dir-slider-icon{width:20px;height:20px;flex-shrink:0;color:var(--muted);}
+.dir-slider{
+  flex:1;
+  -webkit-appearance:none;
+  appearance:none;
+  height:6px;
+  border-radius:3px;
+  background:linear-gradient(90deg,var(--blue),var(--accent-soft),var(--accent),var(--accent-soft),var(--blue));
+  outline:none;
+}
+.dir-slider::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  appearance:none;
+  width:20px;height:20px;
+  border-radius:50%;
+  background:var(--panel);
+  border:3px solid var(--accent);
+  cursor:pointer;
+}
+.dir-slider::-moz-range-thumb{
+  width:20px;height:20px;
+  border-radius:50%;
+  background:var(--panel);
+  border:3px solid var(--accent);
+  cursor:pointer;
+}
+.dir-slider-hint{margin:10px 0 0 0;font-size:0.74rem;color:var(--muted);line-height:1.4;}

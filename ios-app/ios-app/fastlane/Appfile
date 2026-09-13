@@ -1,0 +1,7 @@
+# Values pulled from GitHub Actions secrets/environment at build time - see
+# .github/workflows/ios-build.yml. Nothing here is hardcoded on purpose, so
+# this file never needs to change once your secrets are set correctly.
+app_identifier(ENV["APP_BUNDLE_ID"] || "com.raylight.birdmonitor")
+apple_id(ENV["APPLE_ID_EMAIL"])       # your Apple ID email (only used for reference/lookup, not password auth)
+team_id(ENV["APPLE_TEAM_ID"])         # found in the Apple Developer portal -> Membership
+itc_team_id(ENV["APP_STORE_CONNECT_TEAM_ID"]) # only needed if your Apple ID belongs to multiple App Store Connect teams
