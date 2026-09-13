@@ -1,0 +1,112 @@
+name: iOS Build & Release
+
+# Manual trigger (a button in the GitHub Actions tab) plus an optional tag
+# trigger, so a real release is always something a person decides to do on
+# purpose, not something that fires on every commit and burns through
+# App Store Connect build slots.
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "ios-v*"
+
+# Needed so the "commit the generated native project" step below can push
+# back to this repo using the workflow's own built-in token - no separate
+# personal access token required for that part.
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: ios-app
+
+jobs:
+  build-and-release:
+    # Pinned to a specific image on purpose (not "macos-latest"): a runner
+    # image can silently move to a newer major Xcode version underneath you,
+    # which is exactly the kind of surprise that breaks a signing/build
+    # pipeline right before you need it. Bump this deliberately, on your own
+    # schedule, after checking https://github.com/actions/runner-images for
+    # what's current. As of this writing macos-26 ships Xcode 26.5 by default.
+    runs-on: macos-26
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Generate native iOS project (first run only)
+        run: |
+          if [ ! -d "ios" ]; then
+            echo "No ios/ folder yet - generating it now via Capacitor."
+            npx cap add ios
+          else
+            echo "ios/ already exists, skipping generation."
+          fi
+
+      - name: Copy the web app into www/ and sync into the native project
+        run: npm run cap:sync
+
+      - name: Commit the native project if anything changed
+        # This is what makes the whole pipeline Mac-free forever, not just on
+        # the very first run: once Capacitor generates ios/ here, it's saved
+        # straight back into your repo, so every future run (and you, if you
+        # ever do get Mac access and want to open it in Xcode directly) sees
+        # the same project instead of it being silently regenerated each time.
+        # Only runs on a real branch: a tag checkout is detached HEAD, and
+        # there is no branch ref to push a commit back to. Run this workflow
+        # at least once via the manual "Run workflow" button on a branch
+        # (e.g. main) so the native project gets committed; tag pushes after
+        # that will find ios/ already there and just sync/build it.
+        if: github.ref_type == 'branch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ios/
+          if git diff --cached --quiet; then
+            echo "No changes to the native project - nothing to commit."
+          else
+            git commit -m "chore: sync native iOS project"
+            git push
+          fi
+
+      - name: Install CocoaPods dependencies
+        working-directory: ios-app/ios/App
+        run: pod install --repo-update
+
+      - name: Install fastlane
+        run: gem install fastlane --no-document
+
+      - name: Build and upload to TestFlight
+        env:
+          # --- Apple / App Store Connect identity ---
+          APP_BUNDLE_ID: ${{ secrets.APP_BUNDLE_ID }}
+          APPLE_ID_EMAIL: ${{ secrets.APPLE_ID_EMAIL }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_STORE_CONNECT_TEAM_ID: ${{ secrets.APP_STORE_CONNECT_TEAM_ID }}
+          # --- App Store Connect API key (for fastlane match + upload, no
+          #     Apple ID password or 2FA prompt ever needed in CI) ---
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          # --- fastlane match (signing certificate storage repo) ---
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+        run: fastlane release
+
+      - name: Upload build artifact for this run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raylight-ipa
+          path: ios-app/build/Raylight.ipa
+          if-no-files-found: ignore

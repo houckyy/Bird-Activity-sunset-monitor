@@ -1,0 +1,130 @@
+name: Android Build & Release
+
+# Manual trigger (with a track picker) plus an optional tag trigger, same
+# reasoning as the iOS workflow: a real Play Console upload should always be
+# something a person decides on purpose. Unlike iOS, this entire pipeline
+# runs on a plain Linux runner - Android's toolchain (Gradle, the Android
+# SDK, a JDK) has no Mac/Xcode requirement at any point, which is the one
+# genuinely easier part of this whole publishing story.
+on:
+  workflow_dispatch:
+    inputs:
+      track:
+        description: "Play Console track to upload to"
+        type: choice
+        options: [internal, alpha, beta, production]
+        default: internal
+  push:
+    tags:
+      - "android-v*"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: android-app
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Generate native Android project (first run only)
+        run: |
+          if [ ! -d "android" ]; then
+            echo "No android/ folder yet - generating it now via Capacitor."
+            npx cap add android
+          else
+            echo "android/ already exists, skipping generation."
+          fi
+
+      - name: Copy the web app into www/ and sync into the native project
+        run: npm run cap:sync
+
+      - name: Patch in release signing config (idempotent, first run only)
+        run: node patch-build-gradle.js
+
+      - name: Commit the native project if anything changed
+        # Same reasoning as the iOS workflow: this is what makes the
+        # pipeline reproducible forever, not just on the very first run, and
+        # it can only push on a real branch (a tag checkout is detached
+        # HEAD). Run this at least once via "Run workflow" on a branch (e.g.
+        # main) before pushing an android-v* tag.
+        if: github.ref_type == 'branch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add android/
+          if git diff --cached --quiet; then
+            echo "No changes to the native project - nothing to commit."
+          else
+            git commit -m "chore: sync native Android project"
+            git push
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Decode signing keystore and write keystore.properties
+        # The keystore itself never touches the repo - it's a base64 secret,
+        # decoded straight to a file inside this ephemeral runner and gone
+        # once the job ends. keystore.properties (also gitignored) is what
+        # patch-build-gradle.js's signingConfigs block reads at build time.
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
+          cat > android/keystore.properties <<EOF
+          storeFile=app/release.keystore
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
+          EOF
+
+      - name: Build signed release App Bundle (.aab)
+        working-directory: android-app/android
+        env:
+          # Ties the Play Console version code to this workflow run so every
+          # upload is automatically higher than the last, same idea as the
+          # iOS Fastfile's increment_build_number.
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+        run: |
+          chmod +x gradlew
+          ./gradlew bundleRelease
+
+      - name: Upload to Google Play
+        uses: r0adkll/upload-google-play@v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.raylight.birdmonitor
+          releaseFiles: android-app/android/app/build/outputs/bundle/release/app-release.aab
+          track: ${{ github.event.inputs.track || 'internal' }}
+          status: completed
+
+      - name: Upload build artifact for this run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raylight-aab
+          path: android-app/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: ignore
