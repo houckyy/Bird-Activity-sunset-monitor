@@ -1,0 +1,8 @@
+{
+  "appId": "com.raylight.birdmonitor",
+  "appName": "Raylight",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  }
+}

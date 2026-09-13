@@ -1,0 +1,11 @@
+{
+  "appId": "com.raylight.birdmonitor",
+  "appName": "Raylight",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "always"
+  },
+  "server": {
+    "iosScheme": "capacitor"
+  }
+}

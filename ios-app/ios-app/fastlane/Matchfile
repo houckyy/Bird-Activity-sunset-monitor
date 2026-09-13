@@ -1,0 +1,19 @@
+# fastlane match manages your signing certificate + provisioning profile in
+# a SEPARATE private git repo (not this one), encrypted at rest, so CI can
+# fetch them without ever needing a human to click through Xcode's signing
+# UI - that's what makes fully hands-off, Mac-free signing possible.
+#
+# One-time setup (see ../SETUP.md for the full walkthrough):
+#   1. Create a new EMPTY PRIVATE repo, e.g. "raylight-ios-certificates".
+#   2. Put its URL below (or set MATCH_GIT_URL as a secret instead, if you'd
+#      rather not commit the repo name here).
+#   3. Run `fastlane match appstore` ONCE from any machine that has Xcode -
+#      this is the one step that genuinely benefits from a real Mac, since
+#      it's an interactive first-time setup you'll do exactly once ever. If
+#      you truly have zero Mac access even temporarily, match can also be
+#      bootstrapped via match's API-key + "readonly: false" mode from CI -
+#      see the fastlane match docs linked in SETUP.md for that path.
+git_url(ENV["MATCH_GIT_URL"])
+storage_mode("git")
+type("appstore")
+readonly(true) # CI only ever READS certs that already exist - it never generates new ones on its own

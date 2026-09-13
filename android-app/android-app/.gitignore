@@ -1,0 +1,8 @@
+node_modules/
+www/
+build/
+*.aab
+*.apk
+*.jks
+*.keystore
+local.properties
