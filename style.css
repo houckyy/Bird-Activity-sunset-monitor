@@ -238,6 +238,9 @@ a:visited{color:var(--moss);}
 .loc-status{margin-top:8px; font-size:0.78rem; color:var(--muted);}
 .loc-status.is-error{color:var(--rust);}
 .loc-status.is-ok{color:var(--moss);}
+.log-status{margin-top:8px; font-size:0.78rem; color:var(--muted);}
+.log-status.is-error{color:var(--rust);}
+.log-status.is-ok{color:var(--moss);}
 
 /* Bottom tab bar - the primary nav on a phone */
 .tabs{
@@ -337,6 +340,28 @@ main{
 .grid .card:nth-child(2){animation-delay:.06s;}
 .grid .card:nth-child(3){animation-delay:.12s;}
 @keyframes card-in{from{opacity:0;transform:translateY(10px) scale(.99);}to{opacity:1;transform:translateY(0) scale(1);}}
+/* A background/silent refresh (the 5-minute timer, day rollover, the live
+   clock tick) rebuilds these same elements via innerHTML, which would
+   otherwise replay their entrance animation every time - visibly announcing
+   "a refresh just happened" even though the whole point of a silent refresh
+   is that you can't tell. This class is toggled on <body> for exactly the
+   span of a silent render so none of that plays; a user-triggered refresh
+   never gets this class, so it keeps its normal flourish. */
+body.no-refresh-fx .factor,
+body.no-refresh-fx #sun-times tbody tr,
+body.no-refresh-fx .outlook-day,
+body.no-refresh-fx .orow-detail,
+body.no-refresh-fx .log-table tbody tr,
+body.no-refresh-fx #weather-table tbody tr {
+  animation: none !important;
+}
+/* The bird/golden meter bars smoothly slide to their new width normally -
+   also a "something just changed" tell that a silent refresh shouldn't give
+   away, so it's flattened to an instant jump for the same span. */
+body.no-refresh-fx .meter-fill,
+body.no-refresh-fx .ring {
+  transition: none !important;
+}
 @media (hover:hover){
   .card:hover{transform:rotate(0deg) translateY(-2px);box-shadow:0 1px 0 rgba(255,255,255,0.55) inset, 0 12px 22px -14px var(--shadow-ink);}
 }
@@ -347,6 +372,7 @@ main{
   text-transform:uppercase;letter-spacing:0.08em;
 }
 .h2-icon{width:15px;height:15px;flex-shrink:0;color:var(--moss);opacity:0.85;}
+.h2-icon-img{object-fit:contain;opacity:1;}
 .section-h2{
   display:flex;align-items:flex-start;gap:10px;
   font-family:var(--font-display);
@@ -374,6 +400,7 @@ main{
 .tier-weak{color:#8a6a3d;}
 .tier-flat{color:#a8371f;}
 .sub-stat{color:var(--muted);font-size:0.84rem;margin-bottom:10px;}
+.data-source-psa{font-size:0.78rem;font-style:italic;padding:8px 10px;border-left:2px solid color-mix(in srgb, var(--muted) 45%, transparent);background:color-mix(in srgb, var(--muted) 6%, transparent);border-radius:0 6px 6px 0;}
 
 .quality-row{display:flex;gap:22px;margin-bottom:16px;}
 .quality-ring-block{display:flex;flex-direction:column;align-items:center;gap:7px;}
@@ -408,11 +435,24 @@ main{
 .q-note{font-size:0.68rem;color:var(--accent);text-align:center;line-height:1.3;max-width:130px;}
 .q-note:empty{display:none;}
 
-/* Epic sunrise/sunset (score >=90, verified rare by Monte Carlo sweep -
-   roughly the top ~1% of realistic sky conditions) gets a warm pulsing
-   glow around its ring instead of the plain static border, plus a small
-   badge under the label - a visible "this one is worth going out for"
-   signal rather than just a bigger number. */
+/* Tapping a Dashboard ring reveals the same real-input breakdown the
+   Outlook's rows give per day - same explainQuality() data, just surfaced
+   for "right now" instead of a future day. */
+.ring-toggle{
+  display:flex;flex-direction:column;align-items:center;gap:7px;
+  background:none;border:none;padding:0;margin:0;font:inherit;color:inherit;cursor:pointer;
+  -webkit-tap-highlight-color:transparent;
+}
+.ring-toggle:hover .ring, .ring-toggle:focus-visible .ring{filter:brightness(1.04);}
+.ring-detail{max-width:150px;margin-top:2px;}
+.ring-detail .orow-detail-list li{text-align:left;}
+.ring-tap-hint{font-size:0.68rem;color:var(--muted);text-align:center;margin:2px 0 0 0;}
+
+/* Legendary sunrise/sunset (score >=95) gets a warm pulsing glow around
+   its ring instead of the plain static border, plus a small badge under
+   the label - a visible "this one is worth going out for" signal rather
+   than just a bigger number. Class names below keep the old "epic"
+   internal naming; only the user-facing threshold/label changed. */
 .ring.ring-epic{
   animation:epic-ring-glow 1.8s ease-in-out infinite;
 }
@@ -438,6 +478,18 @@ main{
 @media (prefers-reduced-motion: reduce){
   .ring.ring-epic{animation:none; box-shadow:0 2px 6px -3px var(--shadow-ink-soft), 0 0 10px 3px color-mix(in srgb, var(--ring-color) 55%, transparent);}
   .epic-badge{animation:none;}
+}
+
+/* Same "epic" glow treatment, applied to the bird-activity meter bar
+   instead of a ring - a fixed warm color since the meter's fill is a
+   gradient rather than one tier color the way the sunrise/sunset rings
+   are. */
+.meter-bar.meter-epic{
+  animation:epic-ring-glow 1.8s ease-in-out infinite;
+  --ring-color:#c17a52;
+}
+@media (prefers-reduced-motion: reduce){
+  .meter-bar.meter-epic{animation:none; box-shadow:0 2px 6px -3px var(--shadow-ink-soft), 0 0 10px 3px color-mix(in srgb, #c17a52 55%, transparent);}
 }
 
 /* Same "epic" signal on the 7-day outlook, but static - no motion on 7
@@ -491,10 +543,27 @@ main{
   100%{background:transparent;}
 }
 .outlook-day .oday-name{font-weight:650;margin-bottom:9px;color:var(--text);font-family:var(--font-display);}
-.outlook-day .orow{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px dotted var(--panel-border);font-size:0.88rem;gap:8px;}
-.outlook-day .orow:last-child{border-bottom:none;}
+.outlook-day .orow{
+  display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px dotted var(--panel-border);font-size:0.88rem;gap:8px;
+  width:100%;background:none;border-left:none;border-right:none;border-top:none;
+  font-family:inherit;color:inherit;cursor:pointer;text-align:left;
+  -webkit-tap-highlight-color:transparent;
+}
+.outlook-day .orow:last-of-type{border-bottom:none;}
+.outlook-day .orow:hover, .outlook-day .orow:focus-visible{color:var(--accent);}
 .outlook-day .otime{color:var(--muted);font-size:0.78rem;margin-left:6px;}
 .outlook-day .oscore{font-weight:650;white-space:nowrap;}
+.orow-right{display:flex;align-items:center;gap:4px;}
+.orow-chevron{width:13px;height:13px;flex-shrink:0;color:var(--muted);transition:transform .25s ease;}
+.orow-toggle.is-open .orow-chevron{transform:rotate(180deg);}
+/* Tapping a row reveals exactly which real inputs produced that score - the
+   same explanation the Dashboard already gives for today, extended to every
+   day/event in the outlook instead of leaving the percentage unexplained. */
+.orow-detail{padding:2px 0 10px 0; border-bottom:1px dotted var(--panel-border); animation:card-in .25s ease both;}
+.outlook-day .orow-detail:last-of-type{border-bottom:none;}
+.orow-detail-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px;}
+.orow-detail-list li{font-size:0.76rem;color:var(--muted);line-height:1.35;padding-left:12px;position:relative;}
+.orow-detail-list li::before{content:"-";position:absolute;left:0;color:var(--accent);}
 
 .time-table{width:100%;border-collapse:collapse;font-size:0.86rem;}
 .time-table td{padding:7px 0;border-bottom:1px dotted var(--panel-border);}
@@ -575,6 +644,36 @@ main{
 .stale-banner svg{width:16px;height:16px;flex-shrink:0;color:var(--rust);}
 .stale-banner[hidden]{display:none;}
 
+/* Shown any time the app is still on the Kansas center-of-US fallback
+   coordinate - every card's math is correct for that spot, so this is what
+   actually flags "your real location was never set" instead of leaving it
+   to look like wrong data buried in normal-looking cards. */
+.default-loc-banner{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  background:color-mix(in srgb, var(--rust) 16%, var(--bg-2));
+  border:1.5px solid color-mix(in srgb, var(--rust) 55%, var(--panel-border));
+  color:var(--text);
+  border-radius:10px 4px 10px 4px;
+  padding:11px 13px;
+  font-size:0.8rem;
+  line-height:1.35;
+  margin-bottom:14px;
+}
+.default-loc-banner svg{width:19px;height:19px;flex-shrink:0;color:var(--rust);}
+.default-loc-banner span{flex:1 1 220px;}
+.default-loc-banner button{
+  flex-shrink:0;
+  background:var(--rust);
+  color:#fff;
+  border:none;
+  border-radius:7px;
+  padding:7px 14px;
+  font-size:0.78rem;
+  font-weight:700;
+  cursor:pointer;
+}
+.default-loc-banner[hidden]{display:none;}
+
 /* Buttons are flat ink with a hard-edged offset shadow, like a rubber-stamped
    field ticket - pressed state collapses the offset instead of glowing. */
 .refresh-btn{
@@ -610,14 +709,28 @@ main{
   100%{box-shadow:0 0 0 0 rgba(31,107,92,0);}
 }
 
-.log-form{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;}
+.log-form{display:flex;flex-direction:column;gap:10px;margin-bottom:14px;}
 .log-form input{width:100%;padding:12px 12px;background:var(--panel);border:1px solid var(--panel-border);color:var(--text);border-radius:10px 4px 10px 4px;font-size:0.95rem;}
 .log-form input:focus{outline:none;border-color:var(--moss);}
-.log-rating-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 2px;}
-.log-rating-row label{font-size:0.82rem;color:var(--muted);}
-.log-rating-row select{padding:8px 10px;background:var(--panel);border:1px solid var(--panel-border);color:var(--text);border-radius:8px 3px 8px 3px;font-size:0.85rem;}
+/* Everything that matters for a quick, "just rate it" log entry - the two
+   ratings, the photo shortcut that can fill one of them for you, and the
+   submit button - grouped into one visually distinct card, so it reads as
+   a single compact unit instead of several loose pieces stacked in a row.
+   Species/gear/notes are real but secondary, so they stay outside this
+   card in the plain disclosure below. */
+.log-quick-card{
+  background:var(--panel-2);
+  border:1px solid var(--panel-border);
+  border-radius:14px 4px 14px 4px;
+  padding:14px;
+  display:flex;flex-direction:column;gap:10px;
+}
+.log-rating-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.log-rating-row{display:flex;flex-direction:column;gap:4px;}
+.log-rating-row label{font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.03em;}
+.log-rating-row select{width:100%;padding:9px 8px;background:var(--panel);border:1px solid var(--panel-border);color:var(--text);border-radius:8px 3px 8px 3px;font-size:0.85rem;}
 .log-rating-row select:focus{outline:none;border-color:var(--moss);}
-.log-rating-hint{margin:0;font-size:0.72rem;color:var(--muted);}
+.log-rating-hint{margin:0;font-size:0.7rem;color:var(--muted);line-height:1.35;}
 /* Calibration readout above the Shoot Log form - deliberately plain text,
    not a stat tile, since it's a status message, not a headline number. */
 .calib-status{margin-bottom:12px;padding:10px 12px;background:var(--panel-2);border:1px solid var(--panel-border);border-radius:8px 3px 8px 3px;font-size:0.78rem;color:var(--muted);display:flex;flex-direction:column;gap:3px;}
@@ -630,6 +743,14 @@ main{
   transition:transform .12s ease, box-shadow .12s ease;
 }
 .log-form button:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--panel-border);}
+/* Species/gear/notes are secondary details, not needed for a quick rating-
+   only entry, so they stay behind a closed disclosure below the quick-log
+   card instead of sitting in front of it. */
+.log-optional-details{margin-top:2px;border:1px dashed var(--panel-border);border-radius:8px 3px 8px 3px;padding:2px 10px;}
+.log-optional-details[open]{padding-bottom:10px;}
+.log-optional-details summary{cursor:pointer;font-size:0.78rem;color:var(--muted);padding:8px 0;}
+.log-optional-details summary:hover{color:var(--text);}
+.log-optional-details input{margin-top:8px;}
 .log-actions button{border-radius:10px 4px 10px 4px;border:1px solid var(--panel-border);background:var(--panel-2);color:var(--text);cursor:pointer;font-size:0.88rem;transition:border-color .15s ease, transform .1s ease;}
 .log-actions button:active{border-color:var(--moss);transform:scale(.98);}
 .log-actions{display:flex;gap:8px;margin-bottom:16px;}
@@ -759,9 +880,12 @@ main{
 
   .refresh-btn{width:auto;}
 
-  .log-form{flex-direction:row;flex-wrap:wrap;}
-  .log-form input{flex:1;min-width:140px;width:auto;}
-  .log-form button{width:auto;padding:9px 16px;}
+  /* The quick-log card already stays compact and 2-column at any width, so
+     it keeps its column layout here rather than being forced into a wrapping
+     row like the old flat list of fields was. Only the secondary details
+     disclosure's plain inputs benefit from spreading out on a wider screen. */
+  .log-optional-details{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+  .log-optional-details input{flex:1;min-width:140px;width:auto;margin-top:0;}
   .log-actions button{flex:none;padding:9px 16px;}
   .table-scroll{margin:0;padding:0;}
   .log-table{min-width:0;}
@@ -1012,11 +1136,78 @@ main{
   transition:transform 0.35s ease;
   transform-origin:150px 150px;
 }
+/* Below the horizon, the needle stays visible but recolors blue - still
+   showing where the sun's bearing is, just flagged as "not actually up
+   right now" instead of disappearing outright. */
 .dir-needle.is-below-horizon{stroke:var(--blue);}
-.dir-needle-tip{fill:var(--accent);transition:transform 0.35s ease;transform-origin:150px 150px;}
+.dir-needle-tip{fill:var(--accent);stroke:var(--panel);stroke-width:1;transition:transform 0.35s ease;transform-origin:150px 150px;}
 .dir-needle-tip.is-below-horizon{fill:var(--blue);}
 .dir-compass-hub{fill:var(--text);}
 .dir-status-label{font-size:0.82rem;color:var(--muted);text-align:center;}
+
+/* A second, user-set pointer - tap/drag the dial to mark your own framing
+   or a landmark, independent of the sun needle, so the two can be compared
+   directly on the same dial. Shorter and dashed so it never gets mistaken
+   for the sun needle even when the two nearly line up. */
+.dir-compass{touch-action:none;cursor:crosshair;}
+.dir-manual-needle{
+  stroke:var(--moss);
+  stroke-width:3;
+  stroke-linecap:round;
+  stroke-dasharray:3 6;
+  transform-origin:150px 150px;
+}
+.dir-manual-needle-tip{fill:var(--moss);stroke:var(--panel);stroke-width:1;transform-origin:150px 150px;}
+.dir-manual-hint{font-size:0.72rem;color:var(--muted);text-align:center;margin:2px 0 0 0;}
+.dir-manual-readout{
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  font-size:0.8rem;color:var(--muted);
+}
+.dir-legend-manual{background:var(--moss);border-radius:5px;width:14px;height:6px;display:inline-block;}
+.dir-manual-clear{
+  font-size:0.72rem;
+  padding:2px 10px;
+  border-radius:999px;
+  border:1px solid var(--panel-border);
+  background:var(--panel);
+  color:var(--muted);
+  cursor:pointer;
+}
+.dir-manual-clear:active{background:var(--panel-2);}
+
+/* Where the sun actually sits at sunrise/sunset/blue-hour, marked directly
+   on the dial instead of left as numbers to picture mentally. Lives inside
+   #dir-face-rotator so it turns with the dial along with the N/E/S/W ticks
+   when the live phone-heading rotation is on. */
+.dir-event-dot{stroke:var(--panel);stroke-width:2;}
+.dir-dot-sunrise, .dir-dot-sunset{fill:var(--accent);}
+.dir-event-label{
+  font-family:var(--font-body);
+  font-weight:650;
+  font-size:11px;
+  text-anchor:middle;
+  dominant-baseline:middle;
+  fill:var(--accent);
+  paint-order:stroke;
+  stroke:var(--panel);
+  stroke-width:3px;
+}
+.dir-event-arc{
+  fill:none;
+  stroke:var(--blue);
+  stroke-width:5;
+  stroke-linecap:round;
+  opacity:0.75;
+}
+.dir-events-legend{
+  display:flex; flex-wrap:wrap; justify-content:center; gap:14px;
+  margin:-6px auto 16px auto; max-width:340px;
+  font-size:0.72rem; color:var(--muted);
+}
+.dir-legend-item{display:inline-flex; align-items:center; gap:5px;}
+.dir-legend-swatch{width:10px; height:10px; border-radius:50%; flex-shrink:0; display:inline-block;}
+.dir-legend-sunrise, .dir-legend-sunset{background:var(--accent);}
+.dir-legend-blue{background:var(--blue); border-radius:5px; width:14px; height:6px;}
 
 .dir-time-panel{
   background:var(--panel-2);
@@ -1112,20 +1303,45 @@ main{
 .dir-compass-status{margin:0;font-size:0.74rem;color:var(--muted);max-width:44ch;line-height:1.4;}
 
 /* ---------- Sunset photo scoring (Shoot Log) ---------- */
+/* Lives inside .log-quick-card now, so it's flush (no second nested
+   card/border) - just a thin divider separating it from the ratings
+   above. */
 .photo-score-block{
-  background:var(--panel-2);
-  border:1px solid var(--panel-border);
-  border-radius:10px 3px 10px 3px;
-  padding:12px 14px;
-  margin-bottom:14px;
+  border-top:1px dashed var(--panel-border);
+  padding-top:10px;
 }
-.photo-score-label{display:block;font-size:0.78rem;font-weight:650;color:var(--text);margin-bottom:4px;}
-.photo-score-hint{margin:0 0 10px 0;font-size:0.72rem;color:var(--muted);line-height:1.4;}
+.photo-score-label{display:block;font-size:0.76rem;font-weight:650;color:var(--text);margin-bottom:3px;}
+.photo-score-hint{margin:0 0 8px 0;font-size:0.68rem;color:var(--muted);line-height:1.4;}
 .photo-score-result{
   margin-top:10px;
-  display:flex;align-items:center;gap:12px;
+  display:flex;align-items:center;gap:10px;
   flex-wrap:wrap;
 }
-.photo-score-result img{width:64px;height:64px;object-fit:cover;border-radius:6px 2px 6px 2px;border:1px solid var(--panel-border);}
-.photo-score-text{font-size:0.8rem;color:var(--text);}
+.photo-score-result img{width:112px;height:84px;object-fit:cover;border-radius:8px 3px 8px 3px;border:1px solid var(--panel-border);flex-shrink:0;}
+.photo-score-text{font-size:0.78rem;color:var(--text);flex:1;min-width:140px;}
 .photo-score-text strong{color:var(--accent);}
+.photo-score-breakdown{margin-top:6px;}
+.photo-score-breakdown summary{font-size:0.7rem;font-weight:650;color:var(--accent);cursor:pointer;list-style:none;}
+.photo-score-breakdown summary::-webkit-details-marker{display:none;}
+.photo-score-breakdown summary::before{content:"▸ ";}
+.photo-score-breakdown[open] summary::before{content:"▾ ";}
+.photo-score-breakdown ul{margin:6px 0 0;padding-left:16px;font-size:0.72rem;color:var(--muted);line-height:1.5;}
+.photo-score-breakdown li{margin-bottom:2px;}
+/* Lets an accidental upload be undone without re-submitting the form or
+   picking a different file just to clear it. */
+/* Specificity note: .log-form button (element+class) otherwise beats a
+   plain .photo-remove-btn class selector regardless of source order, which
+   was stretching this into the full-width teal form-button style instead of
+   a small round chip - qualified with the element here to win cleanly. */
+button.photo-remove-btn{
+  width:26px;height:26px;flex-shrink:0;
+  border-radius:50%;
+  border:1px solid var(--panel-border);
+  background:var(--panel);
+  color:var(--rust);
+  font-size:1rem;line-height:1;font-weight:700;
+  cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;
+  box-shadow:none;
+}
+button.photo-remove-btn:active{background:var(--panel-2);border-color:var(--rust);transform:none;}
