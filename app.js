@@ -18,14 +18,72 @@ const LS_CALIB_KEY = "pbam_calibration";
 const CALIB_MIN_SAMPLES = 3;
 // Correction is capped so one run of bad-weather-day outliers can't drag
 // every future prediction far from what the model itself is actually
-// computing from real data.
-const CALIB_MAX_LIGHT_CORRECTION = 25;   // points, on the 0-100 light scale
-const CALIB_MAX_BIRD_CORRECTION = 300;   // points, on the 0-1000 bird scale
+// computing from real data. Sized to roughly one rating tier's worth of
+// movement - full scale divided by the number of rating options in the
+// dropdowns below (5, since "Legendary" was added as a tier on top of the
+// original 4), not an arbitrary number.
+const CALIB_MAX_LIGHT_CORRECTION = 20;   // points, on the 0-100 light scale (100 / 5 tiers)
+const CALIB_MAX_BIRD_CORRECTION = 200;   // points, on the 0-1000 bird scale (1000 / 5 tiers)
 // Actual-outcome ratings map to the same score bands the model itself uses
 // (see computeSunQuality/computeBirdScore below), so a rating of "Good"
 // compares against a predicted score using the same definition of "Good".
-const LIGHT_RATING_SCORES = { poor: 16, fair: 43, good: 65, great: 87 };
-const BIRD_RATING_SCORES = { none: 100, low: 375, moderate: 625, high: 875 };
+const LIGHT_RATING_SCORES = { poor: 16, fair: 43, good: 65, great: 87, legendary: 98 };
+const BIRD_RATING_SCORES = { none: 100, low: 375, moderate: 625, high: 875, legendary: 975 };
+
+// Turns a computed sun-quality result into the matching option value in the
+// Shoot Log's "Rate the sunset/sunrise" dropdown, so the dropdown can be
+// pre-filled with the app's own live prediction instead of always starting
+// at "Didn't rate it".
+function lightKeyForQuality(q) {
+  if (!q || typeof q.score !== "number") return "";
+  if (q.legendary) return "legendary";
+  return q.label ? q.label.toLowerCase() : "";
+}
+// Same idea for the bird-activity dropdown - bands roughly match the
+// verdict tiers computeBirdScore already uses (see its 750/500/250
+// thresholds), plus a top "legendary" band for a score high enough to be
+// genuinely rare on the 0-1000 scale.
+function birdKeyForTotal(total) {
+  if (typeof total !== "number") return "";
+  if (total >= 950) return "legendary";
+  if (total >= 750) return "high";
+  if (total >= 500) return "moderate";
+  if (total >= 250) return "low";
+  return "none";
+}
+// Whichever of today's sun events (sunrise or sunset) is closer to right
+// now is the one a shoot happening "right now" should be judged against.
+// Top-level (not scoped to the DOMContentLoaded handler) so both the Shoot
+// Log wiring and the periodic liveTick() auto-fill can call it.
+function nearestSunQ() {
+  if (!state.sunTimes || !state.qSunrise || !state.qSunset) return null;
+  const now = state.now || new Date();
+  const dSunrise = Math.abs(now - state.sunTimes.times.sunrise);
+  const dSunset = Math.abs(now - state.sunTimes.times.sunset);
+  return dSunrise <= dSunset ? state.qSunrise : state.qSunset;
+}
+// Pre-fills both rating dropdowns with the app's own current prediction
+// (nearest sunrise/sunset quality, live bird-activity score) so logging a
+// shoot is normally "does this look right, tap Add Entry" rather than two
+// blind picks starting from "Didn't rate it" - these dropdowns exist to
+// capture ground truth AGAINST a prediction, so starting from the
+// prediction and letting the user correct or clear it is the natural
+// default. Never overwrites a value the user has actually changed
+// themselves this session (state.logTouched, set by the change listeners
+// in the DOMContentLoaded wiring) or a value already set by the photo-color
+// pre-fill.
+function autoFillLogRatings() {
+  const lightSelect = document.getElementById("log-actual-light");
+  const birdSelect = document.getElementById("log-actual-bird");
+  if (lightSelect && !state.logTouched.light && !lightSelect.value) {
+    const key = lightKeyForQuality(nearestSunQ());
+    if (key) lightSelect.value = key;
+  }
+  if (birdSelect && !state.logTouched.bird && !birdSelect.value) {
+    const key = birdKeyForTotal(state.birdScore ? state.birdScore.total : null);
+    if (key) birdSelect.value = key;
+  }
+}
 // v2: bumped when the horizon math changed (single-ray -> bearing-fan) so
 // old cached results using the weaker method don't linger indefinitely.
 const LS_HORIZON_PREFIX = "pbam_horizon_v2_";
@@ -57,7 +115,24 @@ let state = {
   sunTimes: null,
   sunTimesTomorrow: null,
   weather: null,
-  birdScore: null
+  birdScore: null,
+  // Keyed "sunrise-2026-09-13" / "sunset-2026-09-13" - remembers which
+  // epic sunrise/sunset the celebration effect has already fired for, so
+  // it plays once per newly-detected epic event rather than replaying on
+  // every 15-second liveTick() re-render or tab switch.
+  epicCelebrated: {},
+  // Keyed the same way as epicCelebrated, but tracks whether the device
+  // notification for that specific epic reading has already been sent -
+  // separate because the notification fires immediately (background
+  // refreshes included), while epicCelebrated deliberately waits for the
+  // person to actually be looking at the app.
+  epicNotified: {},
+  // Tracks whether the person has manually changed a Shoot Log rating
+  // dropdown themselves, so autoFillLogRatings() never overwrites their own
+  // choice with a fresh prediction on the next tick/tab switch. Reset after
+  // a successful submit, since the next entry should start from a fresh
+  // prediction again.
+  logTouched: { light: false, bird: false }
 };
 
 // ---------- Location ----------
@@ -70,6 +145,14 @@ function loadLocation() {
 }
 function saveLocation(loc) {
   localStorage.setItem(LS_LOC_KEY, JSON.stringify(loc));
+}
+// True while the app is still sitting on the Kansas center-of-US fallback -
+// i.e. GPS/manual location has never actually landed. Every location-derived
+// reading (current temp, today's high/low, barometer, sun times, bird score)
+// is correct FOR that coordinate, so when this is true the fix is never a
+// code bug in those readings - it's getting a real location set at all.
+function isDefaultLocation(loc) {
+  return !!loc && Math.abs(loc.lat - DEFAULT_LOC.lat) < 0.05 && Math.abs(loc.lon - DEFAULT_LOC.lon) < 0.05;
 }
 
 // ---------- Units ----------
@@ -232,11 +315,48 @@ function fmtTime(d, utcOffsetSeconds) {
   return `${h}:${String(m).padStart(2, "0")} ${ampm}`;
 }
 
+// Breaks a Date down into the wall-clock calendar fields it reads as AT THE
+// LOCATION (year/month/day/hour/minute), using the same shift-then-read-UTC
+// trick as fmtTime, rather than the device's own fields. This is what makes
+// it possible to do calendar math ("this same location-local hour, one day
+// later") without the device's timezone leaking in - critical for anyone
+// who splits time between two timezones (e.g. checking an Illinois location
+// while physically in Colorado), where device-local and location-local can
+// disagree by a full hour or more.
+function locationLocalParts(d, utcOffsetSeconds) {
+  if (utcOffsetSeconds == null) {
+    return { year: d.getFullYear(), month: d.getMonth(), day: d.getDate(), hours: d.getHours(), minutes: d.getMinutes() };
+  }
+  const shifted = new Date(d.getTime() + utcOffsetSeconds * 1000);
+  return { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth(), day: shifted.getUTCDate(), hours: shifted.getUTCHours(), minutes: shifted.getUTCMinutes() };
+}
+
+// Inverse of locationLocalParts: given wall-clock date/time fields AS SEEN
+// AT THE LOCATION, returns the actual UTC instant (a real Date) they
+// correspond to - so a UI control like a time-of-day slider can be read and
+// written entirely in the location's own clock.
+function locationLocalToUtc(year, month, day, hours, minutes, utcOffsetSeconds) {
+  const utcMs = Date.UTC(year, month, day, hours, minutes, 0, 0);
+  return new Date(utcMs - (utcOffsetSeconds || 0) * 1000);
+}
+
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// Same location-vs-device distinction as fmtTime, formatted as a full
+// date+time ("Sep 14, 2:30 PM") for the Direction tab's date/time readout.
+function fmtLocationDateTime(d, utcOffsetSeconds) {
+  if (!(d instanceof Date) || isNaN(d)) return "--";
+  const p = locationLocalParts(d, utcOffsetSeconds);
+  let h = p.hours % 12; if (h === 0) h = 12;
+  const ampm = p.hours >= 12 ? "PM" : "AM";
+  return `${MONTH_ABBR[p.month]} ${p.day}, ${h}:${String(p.minutes).padStart(2, "0")} ${ampm}`;
+}
+
 // ---------- Weather ----------
 async function fetchWeather(loc) {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
     `&current=temperature_2m,relative_humidity_2m,cloud_cover,wind_speed_10m,wind_direction_10m,surface_pressure,precipitation,uv_index` +
-    `&hourly=surface_pressure,cloud_cover_low,cloud_cover_mid,cloud_cover_high,relative_humidity_2m,visibility,precipitation` +
+    `&hourly=surface_pressure,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,relative_humidity_2m,visibility,precipitation` +
+    `&daily=temperature_2m_max,temperature_2m_min` +
     `&past_days=1&forecast_days=7&timezone=auto`;
   const res = await fetchWithTimeout(url);
   if (!res.ok) throw new Error("Weather request failed: " + res.status);
@@ -250,16 +370,37 @@ async function fetchWeather(loc) {
 // physical reason a sunset can look flat and desaturated even under a
 // technically "good" cloud-cover score. Treated as a nice-to-have: if this
 // call fails, the rest of the dashboard renders normally without it.
+//
+// aerosol_optical_depth and dust are also pulled here, hourly across the
+// same 7-day window as the outlook, specifically to feed the sunrise/sunset
+// quality score below - PM2.5/AQI stay display-only (they're measured at
+// ground level, which is a much noisier proxy for what's actually
+// scattering light at the horizon than a real column-integrated optical
+// depth reading is).
 async function fetchAirQuality(loc) {
   try {
-    const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${loc.lat}&longitude=${loc.lon}&current=pm2_5,us_aqi`;
+    const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${loc.lat}&longitude=${loc.lon}&current=pm2_5,us_aqi,aerosol_optical_depth&hourly=aerosol_optical_depth,dust&forecast_days=7`;
     const res = await fetchWithTimeout(url, {}, 6000);
     if (!res.ok) return null;
     const data = await res.json();
-    return data && data.current ? data.current : null;
+    if (!data || !data.current) return null;
+    return { ...data.current, hourly: data.hourly || null };
   } catch (e) {
     return null;
   }
+}
+
+// Nearest hourly aerosol reading to a given moment, from the air-quality
+// service's own hourly.time array - kept as a separate lookup from
+// nearestHourIndex/the main weather data because this comes from an
+// entirely different Open-Meteo service with its own timestamp array, not
+// guaranteed to share indices with the general forecast's hourly arrays.
+function nearestAodAtDate(airQualityHourly, date) {
+  if (!airQualityHourly || !airQualityHourly.time || !airQualityHourly.aerosol_optical_depth) return null;
+  const idx = nearestHourIndex(airQualityHourly, date);
+  if (idx === -1) return null;
+  const aod = airQualityHourly.aerosol_optical_depth[idx];
+  return typeof aod === "number" ? aod : null;
 }
 
 // Find the hourly index whose timestamp is closest to `date`.
@@ -306,19 +447,103 @@ function lightLabelFor(score) {
   return "Poor";
 }
 
-function computeSunQuality(low, mid, high, humidity, obstructionDeg) {
-  const base = triangularScore(high, 40, 60) * 0.55 + triangularScore(mid, 35, 60) * 0.45;
-  const lowMult = Math.max(0, 1 - low / 65);
-  const humMult = Math.max(0.35, 1 - Math.max(0, humidity - 55) / 60);
-  const rawScore = Math.round(Math.max(0, Math.min(100, base * lowMult * humMult)));
+// Aerosol optical depth (AOD): a real, physical measure of how much haze -
+// smoke, dust, general atmospheric particulate - is suspended in the whole
+// air column, at 550nm, from Open-Meteo's air quality model. Its effect on
+// sunset color is genuinely two-sided, not a simple "more haze = worse"
+// penalty like humidity gets: light-to-moderate aerosol loading scatters
+// more blue/green light out of the sun's low-angle path than clean air
+// does, which is exactly why a bit of smoke or dust often makes for a MORE
+// vivid, deeper-red sunset (a well-documented effect - see the visibly
+// intensified sunsets reported downwind of wildfires and Saharan dust
+// events). Past a point, though, the same loading gets thick enough to
+// flatten color into a murky, low-contrast haze and cut visibility outright.
+// This is a genuine refinement, not a primary factor - kept as a mild
+// multiplier (0.55-1.12x) rather than something that can zero out the score
+// on its own the way total cloud cover can.
+function aerosolMultiplier(aod) {
+  if (typeof aod !== "number" || isNaN(aod)) return 1; // no reading for this hour/location - stay neutral, never guess
+  if (aod <= 0.6) {
+    return 1 + (triangularScore(aod, 0.25, 0.45) / 100) * 0.12;
+  }
+  return Math.max(0.55, 1 - (aod - 0.6) * 0.5);
+}
+
+function computeSunQuality(low, mid, high, humidity, obstructionDeg, aod) {
+  // Widths widened and the low-cloud/humidity penalties eased from an
+  // earlier version of this formula that was checked with a 200,000-sample
+  // Monte Carlo sweep and turned out too strict: needing high AND mid cloud
+  // both within a narrow band of their peaks, simultaneously with near-zero
+  // low cloud and low humidity, made a "Great" score (75+) come up in under
+  // 4% of realistic cloud/humidity combinations and pushed the median score
+  // down into "Poor" territory. These wider tents and gentler penalty slopes
+  // move the median into "Fair" and roughly double how often "Great" is
+  // actually reachable, while true washout conditions (near-total cloud
+  // cover at every altitude, or heavy smoke) still correctly score near
+  // zero, and the textbook-ideal combination still hits 100.
+  const base = triangularScore(high, 40, 78) * 0.55 + triangularScore(mid, 35, 72) * 0.45;
+  const lowMult = Math.max(0, 1 - low / 90);
+  const humMult = Math.max(0.5, 1 - Math.max(0, humidity - 65) / 75);
+  const aodMult = aerosolMultiplier(aod);
+  const rawScore = Math.round(Math.max(0, Math.min(100, base * lowMult * humMult * aodMult)));
   const score = calibrateLightScore(rawScore);
   const terrainNote = (typeof obstructionDeg === "number" && obstructionDeg > 1.5)
     ? `~${obstructionDeg.toFixed(1)}° ridge nearby - direct light ends earlier than a flat horizon, color show is unaffected`
     : null;
-  return { score, rawScore, label: lightLabelFor(score), terrainNote };
+  const aodNote = typeof aod === "number"
+    ? (aod > 0.6 ? `haze/smoke is heavy enough (AOD ${aod.toFixed(2)}) to be muting color, not enhancing it`
+      : aod > 0.12 ? `light haze/aerosol (AOD ${aod.toFixed(2)}) likely deepening the color` : null)
+    : null;
+  // "Legendary" is a distinct tier above Great, not just a relabeled 75+ -
+  // the point is that it be genuinely rare, so it means something when it
+  // fires. Set higher than the original "Epic" cutoff (90) specifically to
+  // be reserved for a handful of truly exceptional conditions rather than a
+  // once-every-couple-weeks occurrence - versus Great (75+) at roughly the
+  // top 9-10% of realistic cloud/humidity/aerosol combinations. It's still
+  // reachable (textbook-ideal inputs hit 100), just rare.
+  const legendary = score >= 95;
+  // Raw inputs kept on the result (not just the derived notes) so the UI can
+  // build a full plain-language breakdown on demand - e.g. the Outlook's
+  // "why" panel - without recomputing anything or guessing at the numbers
+  // that actually went into this particular score.
+  return { score, rawScore, label: lightLabelFor(score), terrainNote, aodNote, legendary, inputs: { low, mid, high, humidity, aod } };
 }
 
-function qualityAt(hourly, date, obstructionDeg) {
+// Turns one quality result's raw inputs into short, plain-language lines -
+// what the Outlook's "why" panel shows when someone taps a score, so a 22%
+// or a 91% is never just a number to take on faith. Each line names the
+// actual reading and which way it pushed the score, using the same peak/
+// band values the formula itself uses (kept in sync by reading them out of
+// the same computeSunQuality above rather than hardcoding a second copy).
+function explainQuality(q) {
+  if (!q || !q.inputs) return [];
+  const { low, mid, high, humidity, aod } = q.inputs;
+  const lines = [];
+  const bandNote = (name, pct, peak, width) => {
+    if (typeof pct !== "number") return null;
+    const d = Math.abs(pct - peak);
+    const fit = d <= width * 0.25 ? "near the ideal band - helping the score"
+      : d <= width * 0.65 ? "off the ideal band - a mild drag on the score"
+      : "far outside the ideal band - a heavy drag on the score";
+    return `${name} cloud ${Math.round(pct)}% (ideal ~${peak}%): ${fit}`;
+  };
+  lines.push(bandNote("High", high, 40, 78));
+  lines.push(bandNote("Mid", mid, 35, 72));
+  if (typeof low === "number") {
+    lines.push(low <= 10 ? `Low cloud ${Math.round(low)}%: mostly clear - not blocking the show`
+      : low <= 40 ? `Low cloud ${Math.round(low)}%: partly blocking the show - a mild drag`
+      : `Low cloud ${Math.round(low)}%: heavily blocking the show - a heavy drag on the score`);
+  }
+  if (typeof humidity === "number") {
+    lines.push(humidity <= 65 ? `Humidity ${Math.round(humidity)}%: not high enough to mute color`
+      : `Humidity ${Math.round(humidity)}%: high enough to be washing color out`);
+  }
+  lines.push(q.aodNote ? `Aerosol/haze: ${q.aodNote}` : (typeof aod === "number" ? `Aerosol/haze (AOD ${aod.toFixed(2)}): too clean to matter either way` : "Aerosol/haze: no reading for this hour"));
+  if (q.terrainNote) lines.push(`Terrain: ${q.terrainNote}`);
+  return lines.filter(Boolean);
+}
+
+function qualityAt(hourly, date, obstructionDeg, airQualityHourly) {
   const idx = nearestHourIndex(hourly, date);
   if (idx === -1) return { score: 0, label: "n/a" };
   return computeSunQuality(
@@ -326,8 +551,193 @@ function qualityAt(hourly, date, obstructionDeg) {
     hourly.cloud_cover_mid[idx],
     hourly.cloud_cover_high[idx],
     hourly.relative_humidity_2m[idx],
-    obstructionDeg
+    obstructionDeg,
+    nearestAodAtDate(airQualityHourly, date)
   );
+}
+
+// ---------- Golden hour intensity ----------
+// A deliberately separate score from the sunrise/sunset quality percentage
+// above, because it measures a different thing: quality is about whether
+// the SKY shows color (wants clouds to catch light). Golden hour intensity
+// is about whether the DIRECT, low-angle, warm sunlight itself is strong and
+// unobstructed - the light photographers actually meter and white-balance
+// for - which wants the sun's disc clear, not clouds.
+// Window bounds (-0.833deg to 6deg) match suncalc-lite.js's own
+// sunrise/goldenHourEnd/goldenHour/sunset definitions exactly, so "active"
+// here always agrees with the golden-hour times already shown in the Sun &
+// Light card.
+const GOLDEN_HOUR_LOW_DEG = -0.833;
+const GOLDEN_HOUR_HIGH_DEG = 6;
+
+function isGoldenHourActive(elevationDeg) {
+  return typeof elevationDeg === "number" && elevationDeg >= GOLDEN_HOUR_LOW_DEG && elevationDeg <= GOLDEN_HOUR_HIGH_DEG;
+}
+
+// Correlated color temperature estimate from solar elevation alone. Real
+// physics behind it: as elevation drops, the direct beam's air mass grows
+// (Kasten-Young: m = 1 / (sin(h) + 0.50572*(h+6.07995)^-1.6364)), scattering
+// out progressively more short-wavelength (blue/green) light and leaving a
+// warmer, redder direct beam - which is the entire reason "golden" hour
+// looks golden. This is a simplified curve fit to that well-documented
+// trend (roughly 2000K right at the horizon rising toward ~5300K by 6deg,
+// where it's approaching ordinary daylight), not a spectroradiometer
+// reading - it doesn't know the local aerosol mix, which shifts the real
+// number further. Rounded to the nearest 50K so it doesn't imply more
+// precision than that.
+function estimateColorTemp(elevationDeg) {
+  const h = Math.max(0, elevationDeg);
+  const cct = 5500 - 3500 * Math.exp(-h / 2.2);
+  return Math.round(cct / 50) * 50;
+}
+
+// Rough blackbody-radiator-to-RGB approximation (the standard Tanner
+// Helland fit), used only to paint a small "what color is this light"
+// swatch next to the Kelvin number - not meant as colorimetric ground truth.
+function kelvinToRgb(kelvin) {
+  const temp = Math.max(1000, Math.min(12000, kelvin)) / 100;
+  let r, g, b;
+  if (temp <= 66) {
+    r = 255;
+    g = 99.47 * Math.log(temp) - 161.12;
+  } else {
+    r = 329.7 * Math.pow(temp - 60, -0.133);
+    g = 288.12 * Math.pow(temp - 60, -0.0755);
+  }
+  if (temp >= 66) b = 255;
+  else if (temp <= 19) b = 0;
+  else b = 138.52 * Math.log(temp - 10) - 305.04;
+  const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
+  return `rgb(${clamp(r)}, ${clamp(g)}, ${clamp(b)})`;
+}
+
+function goldenIntensityLabel(score) {
+  if (score >= 70) return "Excellent";
+  if (score >= 45) return "Good";
+  if (score >= 20) return "Weak";
+  return "Flat";
+}
+
+function computeGoldenHourIntensity(elevationDeg, cloudCoverPct, aod) {
+  // Peaks at 2.5deg - a few degrees up from the horizon, where the beam is
+  // still warm and low but strong enough to actually read as "intense"
+  // rather than a dim afterglow - and tapers toward both edges of the
+  // -0.833 to 6deg window.
+  const elevationFactor = triangularScore(elevationDeg, 2.5, 5);
+  // Direct light needs a mostly clear sky in the sun's direction. Total
+  // cloud cover is the only cloud data tied to "right now" rather than a
+  // specific altitude band, so it's used as-is here; by 60% cover the sun
+  // is blocked often enough that direct light can't be relied on.
+  const cloudCoverVal = typeof cloudCoverPct === "number" ? cloudCoverPct : 0;
+  const cloudFactor = Math.max(0, 1 - cloudCoverVal / 60);
+  const aodMult = aerosolMultiplier(aod);
+  const rawScore = Math.round(Math.max(0, Math.min(100, elevationFactor * cloudFactor * aodMult)));
+  const cct = estimateColorTemp(elevationDeg);
+
+  let note;
+  if (cloudCoverVal >= 60) {
+    note = `${Math.round(cloudCoverVal)}% cloud cover is blocking most direct sunlight`;
+  } else if (cloudCoverVal >= 30) {
+    note = `${Math.round(cloudCoverVal)}% cloud cover is cutting into direct light`;
+  } else if (typeof aod === "number" && aod > 0.12) {
+    note = aod > 0.6
+      ? `haze/smoke (AOD ${aod.toFixed(2)}) is thick enough to dim and flatten the light`
+      : `light haze (AOD ${aod.toFixed(2)}) is deepening the warm color`;
+  } else {
+    note = "clear sky, direct light";
+  }
+
+  return { active: true, score: rawScore, label: goldenIntensityLabel(rawScore), cct, note };
+}
+
+// When golden hour isn't happening right now, find the next window (start
+// AND end, checking today's remaining windows, then tomorrow's) so the
+// Dashboard can forecast what THAT window will actually be like instead of
+// just counting down to it with no information.
+function nextGoldenWindow(now, timesToday, timesTomorrow) {
+  const candidates = [
+    { start: timesToday.sunrise, end: timesToday.goldenHourEnd, label: "sunrise" },
+    { start: timesToday.goldenHour, end: timesToday.sunset, label: "sunset" }
+  ];
+  if (timesTomorrow) candidates.push({ start: timesTomorrow.sunrise, end: timesTomorrow.goldenHourEnd, label: "sunrise" });
+  for (const c of candidates) {
+    if (c.start instanceof Date && c.start.getTime() > now.getTime()) return c;
+  }
+  return null;
+}
+
+function formatMinutesUntil(now, target) {
+  const mins = Math.round((target.getTime() - now.getTime()) / 60000);
+  if (mins < 60) return `${mins} min`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
+
+// A forecast version of computeGoldenHourIntensity for a window that hasn't
+// started yet: reads forecast cloud cover/aerosol at the window's midpoint
+// (a short ~20-40min window, so the midpoint is a fine stand-in for "the
+// peak moment") from the same hourly forecast series the rest of the app
+// already fetches, rather than only ever describing "right now."
+function forecastGoldenWindow(loc, window, weatherHourly, airQualityHourly) {
+  if (!window || !weatherHourly || !weatherHourly.cloud_cover) return null;
+  const peakTime = new Date((window.start.getTime() + window.end.getTime()) / 2);
+  const idx = nearestHourIndex(weatherHourly, peakTime);
+  if (idx === -1) return null;
+  const cloudCover = weatherHourly.cloud_cover[idx];
+  const aod = nearestAodAtDate(airQualityHourly, peakTime);
+  const pos = SunCalcLite.getPosition(peakTime, loc.lat, loc.lon);
+  const elevationDeg = pos.altitude * 180 / Math.PI;
+  return computeGoldenHourIntensity(elevationDeg, cloudCover, aod);
+}
+
+function renderGoldenHour(loc, now, elevationDeg, weatherData, airQuality, timesToday, timesTomorrow) {
+  const verdictEl = document.getElementById("golden-verdict");
+  const subEl = document.getElementById("golden-sub");
+  const scoreEl = document.getElementById("golden-score");
+  const fillEl = document.getElementById("golden-fill");
+  const cctEl = document.getElementById("golden-cct");
+  const swatchEl = document.getElementById("golden-cct-swatch");
+  const noteEl = document.getElementById("golden-note");
+
+  if (!weatherData || !isGoldenHourActive(elevationDeg)) {
+    const next = weatherData ? nextGoldenWindow(now, timesToday, timesTomorrow) : null;
+    const forecast = next ? forecastGoldenWindow(loc, next, weatherData.hourly, airQuality && airQuality.hourly) : null;
+
+    if (forecast) {
+      // Forecasting, not measuring - label it as a prediction for a
+      // specific upcoming window rather than a live reading, so it's never
+      // mistaken for "this is happening right now."
+      verdictEl.textContent = `${forecast.label} expected at next ${next.label}`;
+      verdictEl.className = "big-stat verdict-line tier-" + forecast.label.toLowerCase();
+      scoreEl.textContent = forecast.score;
+      fillEl.style.width = forecast.score + "%";
+      cctEl.textContent = `Expected color temp: ~${forecast.cct}K`;
+      swatchEl.style.background = kelvinToRgb(forecast.cct);
+      noteEl.textContent = forecast.note;
+      subEl.textContent = `Forecast for ${next.label} in ${formatMinutesUntil(now, next.start)} (not live - updates as the forecast does)`;
+    } else {
+      verdictEl.textContent = "Not golden hour";
+      verdictEl.className = "big-stat verdict-line";
+      scoreEl.textContent = "--";
+      fillEl.style.width = "0%";
+      cctEl.textContent = "Color temp: --";
+      swatchEl.style.background = "#e8e8e8";
+      noteEl.textContent = "";
+      subEl.textContent = next ? `Next golden hour (${next.label}) in ${formatMinutesUntil(now, next.start)}` : "--";
+    }
+    return;
+  }
+
+  const c = weatherData.current;
+  const result = computeGoldenHourIntensity(elevationDeg, c ? c.cloud_cover : null, airQuality ? airQuality.aerosol_optical_depth : null);
+  verdictEl.textContent = result.label + " golden hour light";
+  verdictEl.className = "big-stat verdict-line tier-" + result.label.toLowerCase();
+  scoreEl.textContent = result.score;
+  fillEl.style.width = result.score + "%";
+  cctEl.textContent = `Color temp: ~${result.cct}K`;
+  swatchEl.style.background = kelvinToRgb(result.cct);
+  noteEl.textContent = result.note;
+  const windowEnd = elevationDeg <= 2.5 && now.getTime() < timesToday.goldenHourEnd.getTime() ? timesToday.goldenHourEnd : timesToday.sunset;
+  subEl.textContent = `Sun at ${elevationDeg.toFixed(1)}° - about ${formatMinutesUntil(now, windowEnd)} of this window left`;
 }
 
 // ---------- Terrain horizon ----------
@@ -380,7 +790,17 @@ function bearingFromAzimuth(azimuthRad) {
 // purchase, and every number here is the exact same solar-position model
 // already used everywhere else in the app (SunCalcLite), just displayed as
 // altitude/azimuth instead of feeding the light-quality or bird-score math.
-state.direction = { mode: "live", date: new Date() };
+state.direction = {
+  mode: "live",
+  date: new Date(),
+  lastBearing: null,     // most recently computed sun bearing, cached so the
+                          // high-frequency compass-heading handler below has
+                          // something cheap to compare against instead of
+                          // recomputing solar position on every sensor event
+  compassOn: false,
+  lastRawHeading: null,  // last raw 0-360 heading, for the wrap-around unwrap below
+  unwrappedRotation: 0  // accumulated rotation with no 359->0 jump, safe to feed a CSS transition
+};
 
 function polarPoint(cx, cy, r, angleDeg) {
   const rad = angleDeg * Math.PI / 180;
@@ -423,6 +843,87 @@ function drawDirCompassFace() {
   dirCompassDrawn = true;
 }
 
+// Shortest signed angular step from a to b, in (-180, 180]. Used to draw the
+// blue-hour arcs without the wraparound glitch a plain (b-a) would hit near
+// 0/360deg, and to pick which way (clockwise/counter-clockwise) the arc
+// should sweep.
+function shortAngleDelta(a, b) {
+  return ((b - a + 540) % 360) - 180;
+}
+
+// One SVG arc path between two compass bearings, always taking the SHORT
+// way around - correct here because the two bearings being connected
+// (nautical dawn -> dawn, or dusk -> nautical dusk) are only ~20-60 minutes
+// apart in real time, so the sun's azimuth between them never actually
+// moves anywhere near half the compass.
+function describeArc(cx, cy, r, fromDeg, toDeg) {
+  const delta = shortAngleDelta(fromDeg, toDeg);
+  const start = polarPoint(cx, cy, r, fromDeg);
+  const end = polarPoint(cx, cy, r, fromDeg + delta);
+  const sweepFlag = delta >= 0 ? 1 : 0;
+  return `M ${start.x} ${start.y} A ${r} ${r} 0 0 ${sweepFlag} ${end.x} ${end.y}`;
+}
+
+// Marks where the sun actually sits on the compass for sunrise, sunset, and
+// both blue-hour windows on whichever day is currently shown (respects the
+// Direction tab's day-forward/back navigation, not just "today") - drawn
+// inside #dir-face-rotator so the marks turn with the dial exactly like the
+// N/E/S/W ticks do when the live phone-heading rotation is active.
+function renderDirSunEvents(loc, d) {
+  const g = document.getElementById("dir-sun-events");
+  if (!g) return;
+  g.innerHTML = "";
+  const sunDay = computeSun(loc, d);
+  const t = sunDay.times;
+  const bearingAt = (date) => {
+    if (!(date instanceof Date) || isNaN(date.getTime())) return null;
+    const pos = SunCalcLite.getPosition(date, loc.lat, loc.lon);
+    return bearingFromAzimuth(pos.azimuth);
+  };
+  const brSunrise = bearingAt(t.sunrise);
+  const brSunset = bearingAt(t.sunset);
+  const brNauticalDawn = bearingAt(t.nauticalDawn);
+  const brDawn = bearingAt(t.dawn);
+  const brDusk = bearingAt(t.dusk);
+  const brNauticalDusk = bearingAt(t.nauticalDusk);
+
+  const RING_R = 140;
+  const ARC_R = 146;
+  const LABEL_R = 122;
+  const NS = "http://www.w3.org/2000/svg";
+
+  const addArc = (fromB, toB) => {
+    if (fromB == null || toB == null) return;
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", describeArc(150, 150, ARC_R, fromB, toB));
+    path.setAttribute("class", "dir-event-arc");
+    g.appendChild(path);
+  };
+  const addMarker = (bearing, cls, label) => {
+    if (bearing == null) return;
+    const p = polarPoint(150, 150, RING_R, bearing);
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("cx", p.x); dot.setAttribute("cy", p.y); dot.setAttribute("r", 6);
+    dot.setAttribute("class", "dir-event-dot " + cls);
+    g.appendChild(dot);
+    const lp = polarPoint(150, 150, LABEL_R, bearing);
+    const text = document.createElementNS(NS, "text");
+    text.setAttribute("x", lp.x); text.setAttribute("y", lp.y);
+    text.setAttribute("class", "dir-event-label " + cls);
+    text.textContent = label;
+    g.appendChild(text);
+  };
+
+  addArc(brNauticalDawn, brDawn);
+  addArc(brDusk, brNauticalDusk);
+  // Labels are plain text, not a "☀ Sunrise" emoji-prefixed label - the sun
+  // emoji is itself a small circle, so paired with the dir-event-dot marker
+  // right next to it, it read as two overlapping circle icons per event
+  // rather than one clear marker.
+  addMarker(brSunrise, "dir-dot-sunrise", "Sunrise");
+  addMarker(brSunset, "dir-dot-sunset", "Sunset");
+}
+
 function directionEnterManual() {
   if (state.direction.mode === "live") state.direction.date = new Date();
   state.direction.mode = "manual";
@@ -434,10 +935,12 @@ function renderDirection() {
   drawDirCompassFace();
 
   const d = state.direction.mode === "live" ? new Date() : state.direction.date;
+  renderDirSunEvents(loc, d);
   const pos = SunCalcLite.getPosition(d, loc.lat, loc.lon);
   const altitudeDeg = pos.altitude * 180 / Math.PI;
   const bearing = bearingFromAzimuth(pos.azimuth);
   const belowHorizon = altitudeDeg < 0;
+  state.direction.lastBearing = bearing; // cached for the live-compass handler, which fires far more often than this function
 
   const altEl = document.getElementById("dir-altitude");
   const azEl = document.getElementById("dir-azimuth");
@@ -463,17 +966,182 @@ function renderDirection() {
       : `${altitudeDeg.toFixed(1)}° above the horizon, facing ${pointName} (${Math.round(bearing)}°)`;
   }
 
+  // Both the readout and the slider below read the LOCATION's wall clock,
+  // not the device's - otherwise scrubbing to "2:00 PM" while checking a
+  // location in a different timezone than the device would silently compute
+  // the sun position for 2:00 PM device-local time instead.
+  const utcOffset = state.weather ? state.weather.utc_offset_seconds : null;
   const labelEl = document.getElementById("dir-datetime-label");
   if (labelEl) {
-    const dateStr = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    const timeStr = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-    labelEl.textContent = dateStr + ", " + timeStr + (state.direction.mode === "live" ? " (live)" : "");
+    labelEl.textContent = fmtLocationDateTime(d, utcOffset) + (state.direction.mode === "live" ? " (live)" : "");
   }
 
   const slider = document.getElementById("dir-time-slider");
   if (slider && document.activeElement !== slider) {
-    slider.value = String(d.getHours() * 60 + d.getMinutes());
+    const p = locationLocalParts(d, utcOffset);
+    slider.value = String(p.hours * 60 + p.minutes);
   }
+
+  updateFacingBadge();
+}
+
+// ---------- Live compass (device orientation) ----------
+// Rotates the whole dial to match which way the phone is actually pointing,
+// like a real handheld compass, rather than always showing north at the
+// top. The sun's needle keeps its true bearing on the dial - rotating the
+// dial is what makes "facing the needle" mean "facing the sun" in real life.
+//
+// This only works on a phone with an orientation/compass sensor exposed to
+// the browser, over HTTPS (the API is blocked on plain http:// as a privacy
+// measure), and iOS 13+ requires an explicit permission grant from a real
+// tap - Apple's rule, not something this code can skip. None of this can be
+// exercised on a desktop browser, which has no compass hardware at all.
+let dirHeadingRafPending = false;
+let dirLatestRawHeading = null;
+let dirFaceNeedsInstantSnap = false; // true for the very first heading reading after enabling live compass
+
+// A single sensor reading that's wildly off from the last one - a
+// recalibration blip, a brief magnetic-field glitch near metal, GPS/compass
+// fusion hiccups - shouldn't be allowed to spin the dial through the full
+// jump in one step; that's exactly what a giant unwanted flip looks like.
+// Capping how far a single reading can move the dial (rather than dropping
+// the reading outright) means a real fast turn still gets there, just over
+// a couple of sensor frames instead of one, while a one-off bad reading
+// gets smoothed into a small correction instead of a full-circle spin -
+// and unlike dropping it, this never leaves tracking stuck comparing later
+// good readings against one bad reference point forever.
+const MAX_HEADING_STEP_DEG = 40;
+
+function unwrapHeading(rawHeading) {
+  // Turns a 0-360 wrap-around reading into a continuous angle, so a CSS
+  // rotation transition never has to visibly spin the long way around when
+  // the heading crosses 0/360.
+  const d = state.direction;
+  if (d.lastRawHeading == null) {
+    d.lastRawHeading = rawHeading;
+    d.unwrappedRotation = rawHeading;
+    // The very first reading can itself be anywhere in 0-360 (e.g. near
+    // 358 while the dial's un-rotated resting position is effectively 0) -
+    // applying that as an animated CSS transition would visibly spin the
+    // dial almost all the way around on activation, even though the end
+    // position is correct. Snap it into place instantly instead; every
+    // reading after this one still animates normally.
+    dirFaceNeedsInstantSnap = true;
+    return d.unwrappedRotation;
+  }
+  let delta = (rawHeading - d.lastRawHeading) % 360;
+  if (delta > 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  if (delta > MAX_HEADING_STEP_DEG) delta = MAX_HEADING_STEP_DEG;
+  if (delta < -MAX_HEADING_STEP_DEG) delta = -MAX_HEADING_STEP_DEG;
+  d.unwrappedRotation += delta;
+  d.lastRawHeading = rawHeading; // always the true raw value, even when the step above was capped, so the next reading measures against reality and tracking can't get stuck
+  return d.unwrappedRotation;
+}
+
+function updateFacingBadge() {
+  const badge = document.getElementById("dir-facing-badge");
+  if (!badge) return;
+  const heading = dirLatestRawHeading;
+  const bearing = state.direction.lastBearing;
+  if (!state.direction.compassOn || heading == null || bearing == null) {
+    badge.hidden = true;
+    return;
+  }
+  const facing = angularDiff(heading, bearing) <= 8;
+  if (facing && badge.hidden) feedbackTap(); // small buzz the moment it lines up, not on every frame
+  badge.hidden = !facing;
+}
+
+function applyDirFaceRotation() {
+  const rotator = document.getElementById("dir-face-rotator");
+  if (rotator) {
+    if (dirFaceNeedsInstantSnap) {
+      // Turn off the transition just long enough to jump straight to the
+      // correct angle with no animated spin, then restore it so every
+      // reading after this one goes back to turning smoothly.
+      rotator.style.transition = "none";
+      rotator.style.transform = `rotate(${-state.direction.unwrappedRotation}deg)`;
+      void rotator.offsetHeight; // force layout so the "none" transition actually applies before it's removed
+      rotator.style.transition = "";
+      dirFaceNeedsInstantSnap = false;
+    } else {
+      rotator.style.transform = `rotate(${-state.direction.unwrappedRotation}deg)`;
+    }
+  }
+  updateFacingBadge();
+  dirHeadingRafPending = false;
+}
+
+function handleOrientationEvent(event) {
+  // iOS Safari exposes a ready-to-use compass heading directly; everything
+  // else has to derive one from the "absolute" alpha value (rotation around
+  // the vertical axis), which uses the opposite rotation direction, hence
+  // the 360-alpha flip.
+  let heading = null;
+  if (typeof event.webkitCompassHeading === "number") {
+    heading = event.webkitCompassHeading;
+  } else if (event.absolute && typeof event.alpha === "number") {
+    heading = (360 - event.alpha) % 360;
+  }
+  if (heading == null || isNaN(heading)) return;
+
+  dirLatestRawHeading = heading;
+  unwrapHeading(heading);
+
+  // Sensor events can fire far faster than the screen can usefully redraw -
+  // batch to one DOM update per animation frame instead of one per event.
+  if (!dirHeadingRafPending) {
+    dirHeadingRafPending = true;
+    requestAnimationFrame(applyDirFaceRotation);
+  }
+}
+
+function setCompassStatus(text) {
+  const el = document.getElementById("dir-compass-status");
+  if (el) el.textContent = text;
+}
+
+function startLiveCompass() {
+  const hasAbsolute = "ondeviceorientationabsolute" in window;
+  window.addEventListener(hasAbsolute ? "deviceorientationabsolute" : "deviceorientation", handleOrientationEvent);
+  state.direction.compassOn = true;
+  const btn = document.getElementById("dir-enable-compass");
+  if (btn) { btn.classList.add("is-live"); btn.textContent = "Live compass on"; }
+  setCompassStatus("Reading your phone's compass sensor. Turn to line the dial's top marker up with the needle - that's the sun's direction.");
+
+  // If no heading ever actually arrives, this is a device/browser without a
+  // usable compass sensor (common on some Android browsers/hardware) - say
+  // so plainly rather than leaving the dial silently doing nothing.
+  setTimeout(() => {
+    if (dirLatestRawHeading == null) {
+      setCompassStatus("No compass reading came from this device - your browser or phone may not expose one. The dial stays fixed north-up instead.");
+      state.direction.compassOn = false;
+      if (btn) { btn.classList.remove("is-live"); btn.textContent = "Enable live compass"; }
+    }
+  }, 3000);
+}
+
+function wireLiveCompassButton() {
+  const btn = document.getElementById("dir-enable-compass");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    if (state.direction.compassOn) return;
+    const DOE = window.DeviceOrientationEvent;
+    if (DOE && typeof DOE.requestPermission === "function") {
+      // iOS 13+: must be called directly from a user gesture, which this is.
+      DOE.requestPermission().then(result => {
+        if (result === "granted") startLiveCompass();
+        else setCompassStatus("Compass permission was declined - the dial stays fixed north-up. You can allow motion & orientation access later in the app's permission settings, or just tap the button again.");
+      }).catch(() => {
+        setCompassStatus("Couldn't request compass permission on this device.");
+      });
+    } else if (window.DeviceOrientationEvent || "ondeviceorientationabsolute" in window) {
+      startLiveCompass();
+    } else {
+      setCompassStatus("This browser doesn't expose a compass sensor - live rotation isn't available here. (Works on most phones; not on desktop.)");
+    }
+  });
 }
 
 function wireDirectionTab() {
@@ -499,8 +1167,13 @@ function wireDirectionTab() {
     directionEnterManual();
     const mins = parseInt(slider.value, 10);
     const base = state.direction.date;
-    state.direction.date = new Date(base.getFullYear(), base.getMonth(), base.getDate(),
-      Math.floor(mins / 60), mins % 60, 0, 0);
+    const utcOffset = state.weather ? state.weather.utc_offset_seconds : null;
+    const p = locationLocalParts(base, utcOffset);
+    // Keeps the location-local calendar date the slider is already on, just
+    // swaps in the location-local hour/minute it was dragged to - then
+    // converts that wall-clock reading back to a real UTC instant.
+    state.direction.date = locationLocalToUtc(p.year, p.month, p.day,
+      Math.floor(mins / 60), mins % 60, utcOffset);
     renderDirection();
   });
 }
@@ -626,14 +1299,54 @@ function paintRing(el, score, label) {
 // satisfying) - the "juicy" landing comes after, from a separate scale-pop
 // applied to the element once the true value is showing.
 const _animatedEls = new WeakMap();
+// Tracks which animateNumber() call is the "current" one for a given
+// element, so a second call on the same element can cancel an
+// already-running count-up instead of racing it - see animateNumber below.
+const _animGen = new WeakMap();
+// Runs fn() with body.no-refresh-fx applied for exactly one paint, then
+// removes it - suppresses the CSS entrance animations on rebuilt list rows
+// (factors, sun-times, outlook days, weather table) for a silent refresh.
+// The double rAF is deliberate: the class has to still be present at the
+// browser's NEXT paint (so the freshly-rebuilt elements are laid out with
+// animation:none) before it's safe to remove it for the following one.
+function withSilentRefreshFx(instant, fn) {
+  if (!instant) { fn(); return; }
+  document.body.classList.add("no-refresh-fx");
+  fn();
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    document.body.classList.remove("no-refresh-fx");
+  }));
+}
+
 function animateNumber(el, to, opts) {
   const suffix = (opts && opts.suffix) || "";
   const duration = (opts && opts.duration) || 700;
   const from = _animatedEls.has(el) ? _animatedEls.get(el) : 0;
+  // Every call invalidates whatever animation loop is currently running on
+  // this element (if any) by bumping its generation counter - a stale
+  // step() below checks this and quietly stops itself instead of continuing
+  // to write text. Without this, a cached-data paint immediately followed
+  // by the live refresh landing (a completely normal sequence on every page
+  // load) started TWO independent requestAnimationFrame loops counting
+  // toward two different targets on the same element, and whichever one
+  // happened to write last on a given frame won - which could leave the
+  // displayed number stuck on neither the old nor the new value while
+  // everything else driven by the same data (e.g. the bird meter's bar
+  // width, set synchronously with no animation) already showed the current
+  // one, producing a number/bar mismatch like "100" next to a 75%-full bar.
+  const myGen = (_animGen.get(el) || 0) + 1;
+  _animGen.set(el, myGen);
+
   if (from === to) { el.textContent = to + suffix; _animatedEls.set(el, to); return; }
+  // Auto-refresh (background timer, day rollover, live clock tick) should be
+  // invisible - the number should just be correct next time you look, not
+  // visibly count up or pop while you're looking at it. Only a refresh the
+  // user actually triggered animates.
+  if (opts && opts.instant) { el.textContent = to + suffix; _animatedEls.set(el, to); return; }
   const start = performance.now();
   const ease = (t) => 1 - Math.pow(1 - t, 3); // ease-out cubic
   function step(now) {
+    if (_animGen.get(el) !== myGen) return; // superseded by a newer call on this element - stop here
     const t = Math.min(1, (now - start) / duration);
     const val = Math.round(from + (to - from) * ease(t));
     el.textContent = val + suffix;
@@ -703,6 +1416,15 @@ function playTone(freq, dur, vol, type) {
 function feedbackTap() { haptic(10); playTone(640, 0.06, 0.045); }
 function feedbackSuccess() { haptic([8, 26, 10]); playTone(660, 0.1, 0.04); setTimeout(() => playTone(880, 0.14, 0.04), 85); }
 function feedbackRefreshDone() { haptic([10, 20, 10, 20]); playTone(980, 0.08, 0.045); setTimeout(() => playTone(700, 0.12, 0.045), 90); }
+// A bigger, three-note rising fanfare for a genuinely rare event (an epic
+// sunrise/sunset showing up) - distinct from the everyday feedbackSuccess
+// so it actually reads as "this one's different," not just another confirm chime.
+function feedbackEpic() {
+  haptic([12, 30, 12, 30, 18]);
+  playTone(660, 0.1, 0.045);
+  setTimeout(() => playTone(830, 0.12, 0.045), 110);
+  setTimeout(() => playTone(1046, 0.2, 0.05), 230);
+}
 
 // A soft mechanical-keyboard-style tick for actually typing - a short,
 // randomized-pitch triangle blip per keystroke reads as a satisfying "clack"
@@ -740,15 +1462,31 @@ function addInkRipple(e) {
   btn.appendChild(ripple);
   ripple.addEventListener("animationend", () => ripple.remove());
 }
-// Wires tap feedback (haptic + optional tone + ink ripple) onto every element
-// matching the given selectors, without needing to touch each one's own
-// click handler. Safe to call once at startup.
+// Wires tap feedback (haptic + tone + ink ripple) onto every element
+// matching the given selector, via ONE delegated listener on document
+// rather than binding each element individually - so it also covers
+// elements that don't exist yet at call time (log table delete buttons,
+// Outlook rows, anything else rebuilt via innerHTML later), not just
+// whatever matched the selector the moment this ran. Safe to call once at
+// startup; call it with a broad selector ("button" catches virtually every
+// tappable control in this app, since that's what they're all built as) to
+// get haptics "everywhere" for free instead of hand-wiring each new button.
 function wireTactileFeedback(selector) {
-  document.querySelectorAll(selector).forEach(el => {
-    el.addEventListener("pointerdown", (e) => {
-      feedbackTap();
-      addInkRipple(e);
-    });
+  document.addEventListener("pointerdown", (e) => {
+    const el = e.target.closest(selector);
+    if (!el || el.disabled) return;
+    feedbackTap();
+    addInkRipple({ currentTarget: el, clientX: e.clientX, clientY: e.clientY });
+  });
+}
+
+// A lighter touch than a full tap - just the buzz, no tone/ripple - for
+// controls where a click-sized ripple doesn't make sense (a dropdown, a
+// range slider) but a small confirmation that something changed still
+// helps, especially with gloves on or without looking at the screen.
+function wireChangeHaptics(selector) {
+  document.addEventListener("change", (e) => {
+    if (e.target.closest && e.target.closest(selector)) haptic(6);
   });
 }
 
@@ -771,15 +1509,32 @@ function fireShutterFlash(playSound) {
   }
 }
 
-// A small confetti-style burst of tier-colored dots from the bird meter -
-// sized for a phone screen, not a full takeover. Particles are position:fixed
-// so they fly freely over whatever's on screen, then remove themselves.
-function fireParticleBurst(originEl, color) {
+// Maps a tier keyword (as used on verdict-line elements throughout the
+// dashboard - "great"/"good"/"fair"/anything else) to the same color
+// language as qualityColor()'s Great/Good/Fair labels, so a refresh burst
+// from any card always matches that card's own tier color.
+function colorForTier(tier) {
+  switch (tier) {
+    case "great": return "#c17a52";
+    case "good": return "#1f6b5c";
+    case "fair": return "#8a6a3d";
+    default: return "#a8371f";
+  }
+}
+
+// A small confetti-style burst of tier-colored dots from wherever it's
+// called - sized for a phone screen, not a full takeover. Particles are
+// position:fixed so they fly freely over whatever's on screen, then remove
+// themselves. Silently does nothing for a hidden/off-tab element (a
+// zero-size bounding rect), so it's safe to call on cards that may not be
+// the currently visible tab.
+function fireParticleBurst(originEl, color, count) {
   if (!originEl) return;
   const rect = originEl.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return;
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
-  const n = 14;
+  const n = count || 14;
   for (let i = 0; i < n; i++) {
     const p = document.createElement("span");
     p.className = "burst-particle";
@@ -792,6 +1547,68 @@ function fireParticleBurst(originEl, color) {
     p.style.background = color;
     document.body.appendChild(p);
     p.addEventListener("animationend", () => p.remove());
+  }
+}
+
+// Fires the "epic sunrise/sunset/bird activity" celebration on whatever
+// dashboard element triggered it: glow pulse (via its own "-epic" CSS
+// class, applied by the caller), a gold/warm particle burst from it, the
+// badge below it, the distinct fanfare feedback, and - if the person has
+// opted in in Settings - a real OS-level notification, so a genuinely rare
+// reading reaches them even if the app isn't the open tab/foreground app
+// right now. Kept as one function so the full treatment (visual + haptic +
+// sound + notification) always fires together.
+function celebrateEpic(originEl, badgeEl) {
+  if (!originEl) return;
+  badgeEl && badgeEl.removeAttribute("hidden");
+  fireParticleBurst(originEl, "#c17a52");
+  feedbackEpic();
+}
+
+// ---------- Epic condition device notifications ----------
+// Opt-in (Settings > Epic condition alerts) since requesting notification
+// permission unprompted is both bad practice and, on most browsers, simply
+// refused/ignored outside a direct user gesture anyway.
+const LS_EPIC_ALERTS_KEY = "pbam_epic_alerts";
+function loadEpicAlertsEnabled() { return localStorage.getItem(LS_EPIC_ALERTS_KEY) === "1"; }
+function saveEpicAlertsEnabled(v) { localStorage.setItem(LS_EPIC_ALERTS_KEY, v ? "1" : "0"); }
+
+// Sends an actual device/OS notification (not just an in-page badge) for a
+// newly-detected epic reading. Prefers the service worker registration's
+// showNotification() - the path that actually works for a PWA on Android
+// and reaches the system tray even when the app isn't the foreground tab -
+// falling back to a bare `new Notification()` for a desktop browser with no
+// active service worker. Every failure mode (permission never granted,
+// Notification API missing entirely, no registered service worker yet) is a
+// silent no-op: the in-app badge/burst/haptic above already covers "you're
+// looking at the app right now," so this is purely a bonus reach when
+// they're not.
+function notifyEpic(title, body) {
+  if (!loadEpicAlertsEnabled()) return;
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const opts = {
+    body,
+    icon: "assets/raylight-bird-icon-right.png",
+    badge: "assets/raylight-bird-icon-right.png",
+    tag: "raylight-epic", // replaces any still-showing epic notification instead of stacking duplicates
+    renotify: true
+  };
+  const fallback = () => { try { new Notification(title, opts); } catch (e) { /* unsupported here either - fine */ } };
+  if ("serviceWorker" in navigator) {
+    // navigator.serviceWorker.ready is a Promise that only resolves once a
+    // service worker is actually active for this origin - if registration
+    // never completes (blocked, still installing, briefly offline), it
+    // hangs forever rather than rejecting, which would otherwise mean this
+    // notification silently never shows and never falls back either. Race
+    // it against a short timeout so a slow/failed registration still ends
+    // up going through the plain `new Notification()` path instead of
+    // vanishing.
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("sw not ready")), 1500));
+    Promise.race([navigator.serviceWorker.ready, timeout])
+      .then(reg => reg.showNotification(title, opts))
+      .catch(fallback);
+  } else {
+    fallback();
   }
 }
 
@@ -809,54 +1626,46 @@ function pressureTrend(data) {
   }
 }
 
-function exposureGuidance(elevationDeg, cloudCoverPct) {
-  // Light level proxy: higher sun elevation and clearer skies = more light.
-  // Bird/BIF photography assumes a fast shutter (~1/1600-1/2500) is non-negotiable,
-  // so ISO is the variable that absorbs light loss.
-  let lightScore = Math.max(0, elevationDeg) * (1 - cloudCoverPct / 100 * 0.5);
-  // elevationDeg can be negative (below horizon); floor at 0 contribution from sun angle,
-  // twilight shooting is base-ISO-unfriendly regardless of cloud cover.
-  if (elevationDeg <= 0) lightScore = 0;
-
-  let isoLow, isoHigh, verdict, tier;
-  if (elevationDeg <= 0) {
-    isoLow = 3200; isoHigh = 12800;
-    verdict = "Below horizon - twilight/high-ISO conditions";
-    tier = "poor";
-  } else if (lightScore > 35) {
-    isoLow = 100; isoHigh = 400;
-    verdict = "Strong direct light - base ISO viable";
-    tier = "great";
-  } else if (lightScore > 15) {
-    isoLow = 400; isoHigh = 1600;
-    verdict = cloudCoverPct > 60 ? "Overcast but bright - soft even light" : "Moderate light";
-    tier = "good";
-  } else if (lightScore > 5) {
-    isoLow = 1600; isoHigh = 6400;
-    verdict = "Low light - fast shutter will cost you ISO";
-    tier = "fair";
-  } else {
-    isoLow = 6400; isoHigh = 25600;
-    verdict = "Very low light - expect heavy noise at BIF shutter speeds";
-    tier = "poor";
-  }
-  return { verdict, isoLow, isoHigh, tier };
-}
-
 // ---------- Bird activity model ----------
 function hoursBetween(a, b) {
   return (a.getTime() - b.getTime()) / 3600000;
 }
 
+// Real nocturnal migratory flight - not modeled by the diurnal/crepuscular
+// curve below at all - is often the single largest bird-activity signal at
+// night during the spring/fall migration windows. Radar-tracked nocturnal
+// migration traffic (Cornell's BirdCast, birdcast.info/science) consistently
+// ramps up starting roughly an hour after local sunset, peaks a few hours
+// into full darkness, then tapers off well before dawn. This bonus is
+// additive on top of the low night floor below, gated to migration season
+// AND to genuine darkness (past nautical twilight, elevationDeg <= -12) so
+// it never touches the well-established dawn/dusk/midday shape the rest of
+// the year - it only fills in the one real gap the diurnal model itself
+// documents (see the "not built for nocturnal migrants" note below).
+function nocturnalMigrationBonus(elevationDeg, now, times) {
+  if (elevationDeg > -12) return 0; // still twilight - already covered by the curve below
+  if (expectedTailwindBearing(now) === null) return 0; // outside spring/fall migration windows
+  const hrSinceSunset = hoursBetween(now, times.sunset);
+  if (!(hrSinceSunset > 0)) return 0; // guard against bad/missing sunset data
+  const sigma = 2.5;
+  const peakHours = 3.5; // radar migration traffic typically peaks a few hours after full dark
+  const gauss = Math.exp(-Math.pow(hrSinceSunset - peakHours, 2) / (2 * sigma * sigma));
+  return gauss * 55;
+}
+
 // Daylight/twilight activity potential (0-100), the model's foundation.
 // This is deliberately tuned for diurnal/crepuscular species (passerines,
-// woodpeckers, raptors, waterfowl) - not owls or nocturnal migrants, which
-// this tool is not built for.
+// woodpeckers, raptors, waterfowl), with nocturnalMigrationBonus() above
+// covering the one nocturnal case that genuinely matters at this scale
+// (migratory flight during the spring/fall windows) - it's still not built
+// for owls or other non-migratory nocturnal behavior.
 // Shape: a daytime baseline (activity all day, but with the well-documented
 // midday lull), a sharp bonus right at sunrise/sunset (dawn chorus, pre-roost
-// feeding), ramping down through twilight, and a low floor at full night.
+// feeding), ramping down through twilight, a low floor at full night, and a
+// migration-season night bump layered on top of that floor.
 // This is a GATE, not just one of several additive terms - weather and
-// season below can only modulate it, not manufacture activity at 2 AM.
+// season below can only modulate it, not manufacture activity at 2 AM outside
+// migration season.
 // The three factors below (diel position, weather, season) are a HEURISTIC
 // proxy model - the sole basis for this score. It cannot know what birds are
 // actually present; it estimates activity probability from documented
@@ -892,7 +1701,8 @@ function dielFactor(elevationDeg, now, times) {
     const t = Math.min(1, Math.max(0, (elevationDeg + 18) / 6)); // ramps out by -18deg (astronomical night)
     base = 3 + t * 7; // low floor - not zero (owls, nocturnal flight calls exist) but near it
   }
-  return Math.round(Math.min(100, base + twilightBonus));
+  const nightMigration = nocturnalMigrationBonus(elevationDeg, now, times);
+  return Math.round(Math.min(100, base + twilightBonus + nightMigration));
 }
 
 // Expected supportive ("tailwind") bearing for migratory movement by season -
@@ -1049,22 +1859,53 @@ function computeBirdScore(now, times, weatherData, elevationDeg) {
   const weather = weatherFactor(weatherData, trend, now, elevationDeg);
   const season = seasonalFactor(now);
 
-  // Weather and season are MODIFIERS on the diel gate (roughly +-45% and
-  // +-30% swings), not independent additive scores - that's what stops
-  // "great weather + migration season" from producing a nonzero score at
-  // 2 AM when there is no diurnal activity potential to modulate.
-  const weatherMult = 0.55 + (weather / 100) * 0.6;   // 0.55 - 1.15
-  const seasonMult = 0.7 + (season / 100) * 0.5;      // 0.70 - 1.20
+  // Weather and season are MODIFIERS on the diel gate, not independent
+  // additive scores - that's what stops "great weather + migration season"
+  // from producing a nonzero score at 2 AM when there is no diurnal activity
+  // potential to modulate.
+  //
+  // The bonus headroom above 1.0x on each modifier is intentionally kept
+  // small (max +5% apiece, +10.25% combined) rather than the +15%/+20% this
+  // originally shipped with. At +15%/+20%, diel only needed to reach ~72.5
+  // (100/1.15/1.20) for a perfect-weather, peak-migration moment to already
+  // saturate the 0-100 ceiling - and diel sits above 90 for a combined ~2
+  // hours a day (about an hour either side of both sunrise and sunset,
+  // twice a day, every day; see the gaussian twilight bonus above). Checking
+  // the app near dawn or dusk during migration season - exactly when this
+  // app is most likely to be opened - would hit a literal 1000/1000 far too
+  // routinely for that to read as meaningful. With the combined multiplier
+  // capped at 1.1025x, saturating now requires diel above ~90.7 (a
+  // ~55-minute window around sunrise/sunset) AND weather at its literal
+  // unpenalized best AND being inside one of the ~2-month migration windows,
+  // all at once - a genuinely rare confluence rather than a routine one.
+  const weatherMult = 0.6 + (weather / 100) * 0.45;   // 0.60 - 1.05
+  const seasonMult = 0.75 + (season / 100) * 0.3;     // 0.75 - 1.05
 
   const total0to100 = Math.max(0, Math.min(100, diel * weatherMult * seasonMult));
   const rawTotal = Math.round(total0to100 * 10); // reported on a 0-1000 scale
   const total = calibrateBirdScore(rawTotal);
+
+  // How much of the diel gate right now is coming from nocturnal migratory
+  // flight specifically (nocturnalMigrationBonus above), rather than from
+  // ordinary daytime/twilight activity. This matters for the verdict text:
+  // a high number after dark during migration season is real (radar and
+  // nocturnal flight-call monitoring - e.g. Cornell's BirdCast - documents
+  // a genuine post-sunset surge in migratory movement), but it's overhead
+  // migratory flight, not local birds someone would see or hear on the
+  // ground, and saying "High activity" with no further context at 10:30 PM
+  // reads as simply wrong rather than as what it actually is.
+  const nightMigContribution = nocturnalMigrationBonus(elevationDeg, now, times);
+  const isNightDriven = elevationDeg <= -12 && nightMigContribution > diel * 0.4;
 
   let verdict, tier;
   if (total >= 750) { verdict = "High activity likely (model estimate)"; tier = "great"; }
   else if (total >= 500) { verdict = "Moderate activity likely (model estimate)"; tier = "good"; }
   else if (total >= 250) { verdict = "Low activity likely (model estimate)"; tier = "fair"; }
   else { verdict = "Quiet period likely (model estimate)"; tier = "poor"; }
+
+  if (isNightDriven && total >= 500) {
+    verdict += " - overhead nocturnal migration, not birds you'd see or hear on the ground";
+  }
 
   const factors = {
     "Daylight/twilight position": diel,
@@ -1074,6 +1915,7 @@ function computeBirdScore(now, times, weatherData, elevationDeg) {
   };
   // Only surfaced when actually in play, so the factor grid doesn't fill up
   // with a wall of "0" rows for conditions that aren't currently relevant.
+  if (nightMigContribution > 5) factors["Nocturnal migration flight"] = `+${Math.round(nightMigContribution)}`;
   const rainBonus = postRainForagingBonus(weatherData, now);
   if (rainBonus > 0) factors["Post-rain foraging pulse"] = `+${rainBonus}`;
   const fogPenalty = fogSuppressionPenalty(weatherData, now);
@@ -1164,24 +2006,92 @@ function renderSun(loc, now, sunToday, sunTomorrow, utcOffsetSeconds, horizon) {
   return phase;
 }
 
-function renderTodayQuality(times, weatherData, horizon) {
-  const qSunrise = qualityAt(weatherData.hourly, times.sunrise, horizon && horizon.sunriseObstructionDeg);
-  const qSunset = qualityAt(weatherData.hourly, times.sunset, horizon && horizon.sunsetObstructionDeg);
+function renderTodayQuality(times, weatherData, horizon, airQuality, instant) {
+  const aqHourly = airQuality && airQuality.hourly;
+  const qSunrise = qualityAt(weatherData.hourly, times.sunrise, horizon && horizon.sunriseObstructionDeg, aqHourly);
+  const qSunset = qualityAt(weatherData.hourly, times.sunset, horizon && horizon.sunsetObstructionDeg, aqHourly);
   // Kept on state so the Shoot Log can attach "what did the model actually
   // predict right now" to whichever entry gets logged next.
   state.qSunrise = qSunrise;
   state.qSunset = qSunset;
-  animateNumber(document.getElementById("q-sunrise"), qSunrise.score, { suffix: "%" });
+  animateNumber(document.getElementById("q-sunrise"), qSunrise.score, { suffix: "%", instant });
   document.getElementById("q-sunrise-label").textContent = qSunrise.label;
-  animateNumber(document.getElementById("q-sunset"), qSunset.score, { suffix: "%" });
+  animateNumber(document.getElementById("q-sunset"), qSunset.score, { suffix: "%", instant });
   document.getElementById("q-sunset-label").textContent = qSunset.label;
-  paintRing(document.getElementById("ring-sunrise"), qSunrise.score, qSunrise.label);
-  paintRing(document.getElementById("ring-sunset"), qSunset.score, qSunset.label);
+  const ringSunriseEl = document.getElementById("ring-sunrise");
+  const ringSunsetEl = document.getElementById("ring-sunset");
+  paintRing(ringSunriseEl, qSunrise.score, qSunrise.label);
+  paintRing(ringSunsetEl, qSunset.score, qSunset.label);
+
+  // Spells out WHY today's number is what it is, right where the number is -
+  // specifically the two factors that don't just uniformly push the score
+  // one direction (terrain and aerosol), since those are the ones that can
+  // otherwise look like an unexplained swing from one day to the next.
+  const noteFor = q => [q.terrainNote, q.aodNote].filter(Boolean).join(" · ");
+  document.getElementById("q-sunrise-note").textContent = noteFor(qSunrise);
+  document.getElementById("q-sunset-note").textContent = noteFor(qSunset);
+
+  // Fills the click-to-expand breakdown behind each ring with the exact
+  // same explainQuality() lines the Outlook uses, so "why is this score X"
+  // always reads the same whether it's asked about today or a forecast day.
+  const fillDetail = (kind, q) => {
+    const list = document.querySelector("#ring-detail-" + kind + " .orow-detail-list");
+    if (list) list.innerHTML = explainQuality(q).map(line => `<li>${line}</li>`).join("");
+  };
+  fillDetail("sunrise", qSunrise);
+  fillDetail("sunset", qSunset);
+
+  // Legendary (score >=95) treatment: the glow ring and badge stay up for as
+  // long as the reading holds, but the burst/fanfare only fires once per
+  // newly-detected legendary sunrise or sunset (keyed by calendar date), so
+  // it doesn't replay on every 15-second background refresh or tab switch.
+  const dateKey = times.sunrise instanceof Date ? times.sunrise.toISOString().slice(0, 10) : "unknown";
+  applyEpicUi("sunrise", qSunrise.legendary, ringSunriseEl, document.getElementById("epic-badge-sunrise"), dateKey, instant,
+    "Legendary sunrise conditions", "Today's sunrise is shaping up to be a rare one - worth getting up for.");
+  applyEpicUi("sunset", qSunset.legendary, ringSunsetEl, document.getElementById("epic-badge-sunset"), dateKey, instant,
+    "Legendary sunset conditions", "Tonight's sunset is shaping up to be a rare one - worth heading out for.");
 }
 
-function renderOutlook(loc, weatherData, horizon) {
+function applyEpicUi(kind, isEpic, ringEl, badgeEl, dateKey, instant, notifyTitle, notifyBody, epicClass) {
+  if (!ringEl) return;
+  ringEl.classList.toggle(epicClass || "ring-epic", !!isEpic);
+  if (!isEpic) {
+    badgeEl && badgeEl.setAttribute("hidden", "");
+    return;
+  }
+  const key = kind + "-" + dateKey;
+  // The device notification fires the FIRST moment a reading crosses into
+  // epic territory, on a silent background refresh included - that's the
+  // entire point of a real notification instead of just an in-app badge:
+  // reaching the person when they're not already looking at the app.
+  // Tracked separately from the in-app celebration below, which
+  // deliberately waits for a manual refresh instead.
+  if (!state.epicNotified[key]) {
+    state.epicNotified[key] = true;
+    if (notifyTitle) notifyEpic(notifyTitle, notifyBody);
+  }
+  if (state.epicCelebrated[key]) {
+    // Already celebrated this exact epic reading - keep the glow/badge up
+    // (set right above) but skip the burst/fanfare replay.
+    badgeEl && badgeEl.removeAttribute("hidden");
+    return;
+  }
+  // A background auto-refresh is the wrong moment to spend the "first
+  // celebration" of a newly-epic reading - it should stay unclaimed
+  // (state.epicCelebrated left false) so the full burst/haptic/fanfare still
+  // fires the next time a REAL (manual) refresh sees it, rather than being
+  // silently consumed off-screen. The badge itself still shows either way -
+  // only the one-off flourish is gated.
+  badgeEl && badgeEl.removeAttribute("hidden");
+  if (instant) return;
+  state.epicCelebrated[key] = true;
+  celebrateEpic(ringEl, badgeEl);
+}
+
+function renderOutlook(loc, weatherData, horizon, airQuality) {
   const grid = document.getElementById("outlook-grid");
   grid.innerHTML = "";
+  const aqHourly = airQuality && airQuality.hourly;
   const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   for (let d = 0; d < 7; d++) {
     const day = new Date();
@@ -1189,18 +2099,52 @@ function renderOutlook(loc, weatherData, horizon) {
     const { times } = computeSun(loc, day);
     // Terrain doesn't change day to day, so the same cached obstruction
     // angles apply across the whole outlook - no repeated elevation calls.
-    const qSunrise = qualityAt(weatherData.hourly, times.sunrise, horizon && horizon.sunriseObstructionDeg);
-    const qSunset = qualityAt(weatherData.hourly, times.sunset, horizon && horizon.sunsetObstructionDeg);
+    const qSunrise = qualityAt(weatherData.hourly, times.sunrise, horizon && horizon.sunriseObstructionDeg, aqHourly);
+    const qSunset = qualityAt(weatherData.hourly, times.sunset, horizon && horizon.sunsetObstructionDeg, aqHourly);
+    // Golden hour intensity (direct warm light) is a deliberately separate
+    // measure from the sky-color quality scores above - see the big comment
+    // on computeGoldenHourIntensity. Forecast it at each day's morning and
+    // evening window using the same forecastGoldenWindow() helper the
+    // Dashboard's "next golden window" card already uses.
+    const goldenAM = forecastGoldenWindow(loc, { start: times.sunrise, end: times.goldenHourEnd }, weatherData.hourly, aqHourly);
+    const goldenPM = forecastGoldenWindow(loc, { start: times.goldenHour, end: times.sunset }, weatherData.hourly, aqHourly);
     const el = document.createElement("div");
     el.className = "outlook-day" + (d === 0 ? " is-today" : "");
     el.style.setProperty("--stagger-delay", (d * 45) + "ms");
+    // Each row is a tappable toggle rather than a plain readout - clicking
+    // it reveals exactly which real inputs (cloud bands, humidity, aerosol,
+    // terrain) produced that specific number, using explainQuality() on the
+    // same result object already computed above, so the breakdown always
+    // matches the score shown, not a re-derived guess at it.
+    const chevron = '<svg class="orow-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>';
+    const detailHtml = (q) => `<ul class="orow-detail-list">${explainQuality(q).map(line => `<li>${line}</li>`).join("")}</ul>`;
+    const goldenColor = (score) => score >= 70 ? "#1f6b5c" : score >= 45 ? "#c17a52" : score >= 20 ? "#8a6a3d" : "#a8371f";
+    const goldenRow = (g, timeLabel, rowLabel) => {
+      if (!g) return "";
+      return `
+      <button type="button" class="orow orow-toggle"><span>${rowLabel} <span class="otime">${timeLabel}</span></span>
+        <span class="orow-right"><span class="oscore" style="color:${goldenColor(g.score)}">${g.score}% ${g.label}</span>${chevron}</span></button>
+      <div class="orow-detail" hidden><ul class="orow-detail-list"><li>${g.note}</li><li>Estimated color temp ~${g.cct}K</li></ul></div>`;
+    };
     el.innerHTML = `
       <div class="oday-name">${dayNames[day.getDay()]} ${day.getMonth() + 1}/${day.getDate()}</div>
-      <div class="orow"><span>Sunrise <span class="otime">${fmtTime(times.sunrise, weatherData.utc_offset_seconds)}</span></span>
-        <span class="oscore" style="color:${qualityColor(qSunrise.label)}">${qSunrise.score}% ${qSunrise.label}</span></div>
-      <div class="orow"><span>Sunset <span class="otime">${fmtTime(times.sunset, weatherData.utc_offset_seconds)}</span></span>
-        <span class="oscore" style="color:${qualityColor(qSunset.label)}">${qSunset.score}% ${qSunset.label}</span></div>
+      <button type="button" class="orow orow-toggle"><span>Sunrise <span class="otime">${fmtTime(times.sunrise, weatherData.utc_offset_seconds)}</span></span>
+        <span class="orow-right"><span class="oscore${qSunrise.legendary ? " oscore-epic" : ""}" style="color:${qualityColor(qSunrise.label)}">${qSunrise.score}% ${qSunrise.label}</span>${chevron}</span></button>
+      <div class="orow-detail" hidden>${detailHtml(qSunrise)}</div>
+      ${goldenRow(goldenAM, fmtTime(times.sunrise, weatherData.utc_offset_seconds) + "–" + fmtTime(times.goldenHourEnd, weatherData.utc_offset_seconds), "Golden Hour (AM)")}
+      <button type="button" class="orow orow-toggle"><span>Sunset <span class="otime">${fmtTime(times.sunset, weatherData.utc_offset_seconds)}</span></span>
+        <span class="orow-right"><span class="oscore${qSunset.legendary ? " oscore-epic" : ""}" style="color:${qualityColor(qSunset.label)}">${qSunset.score}% ${qSunset.label}</span>${chevron}</span></button>
+      <div class="orow-detail" hidden>${detailHtml(qSunset)}</div>
+      ${goldenRow(goldenPM, fmtTime(times.goldenHour, weatherData.utc_offset_seconds) + "–" + fmtTime(times.sunset, weatherData.utc_offset_seconds), "Golden Hour (PM)")}
     `;
+    el.querySelectorAll(".orow-toggle").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const detail = btn.nextElementSibling;
+        const open = !detail.hasAttribute("hidden");
+        if (open) { detail.setAttribute("hidden", ""); btn.classList.remove("is-open"); }
+        else { detail.removeAttribute("hidden"); btn.classList.add("is-open"); }
+      });
+    });
     grid.appendChild(el);
   }
 }
@@ -1208,11 +2152,6 @@ function renderOutlook(loc, weatherData, horizon) {
 function renderWeather(sunToday, weatherData, airQuality) {
   const c = weatherData.current;
   const trend = pressureTrend(weatherData);
-  const exp = exposureGuidance(sunToday.elevationDeg, c.cloud_cover);
-  const expEl = document.getElementById("exposure-verdict");
-  expEl.textContent = exp.verdict;
-  expEl.className = "big-stat tier-" + exp.tier;
-  document.getElementById("iso-suggestion").textContent = `Suggested ISO range: ${exp.isoLow}-${exp.isoHigh}`;
 
   const rowIcons = {
     cloud: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 16.5a4 4 0 0 1 .5-8 5 5 0 0 1 9.7-1.5A4.5 4.5 0 0 1 17.5 16H7Z"/></svg>',
@@ -1223,10 +2162,30 @@ function renderWeather(sunToday, weatherData, airQuality) {
   };
   const uvVal = c.uv_index;
   const uvNote = uvVal == null ? "" : uvVal >= 8 ? " (very high)" : uvVal >= 6 ? " (high)" : uvVal >= 3 ? " (moderate)" : " (low)";
+  // "Temperature" on its own used to read as ambiguous - is that right now,
+  // or the day's high? It's always current.temperature_2m (Open-Meteo's
+  // actual current reading, not a daily aggregate), but says so explicitly
+  // now, plus shows today's real low/high right next to it for context -
+  // found by matching today's location-local date against the daily
+  // forecast's own date strings, not a hardcoded array index, so it's still
+  // correct regardless of the past_days offset in the request.
+  let todayHigh = null, todayLow = null;
+  if (weatherData.daily && Array.isArray(weatherData.daily.time)) {
+    const p = locationLocalParts(new Date(), weatherData.utc_offset_seconds);
+    const todayStr = `${p.year}-${String(p.month + 1).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
+    const idx = weatherData.daily.time.indexOf(todayStr);
+    if (idx !== -1) {
+      todayHigh = weatherData.daily.temperature_2m_max[idx];
+      todayLow = weatherData.daily.temperature_2m_min[idx];
+    }
+  }
+  const rangeText = (typeof todayHigh === "number" && typeof todayLow === "number")
+    ? ` (today's range: L ${formatTemp(todayLow)} / H ${formatTemp(todayHigh)})`
+    : "";
   const rows = [
     ["cloud", "Cloud cover", `${c.cloud_cover}%`],
     ["wind", "Wind", formatWind(c.wind_speed_10m)],
-    ["temp", "Temperature", formatTemp(c.temperature_2m)],
+    ["temp", "Temperature (current)", formatTemp(c.temperature_2m) + rangeText],
     ["humid", "Humidity", `${c.relative_humidity_2m}%`],
     ["uv", "UV index", uvVal == null ? "--" : `${uvVal.toFixed(1)}${uvNote}`]
   ];
@@ -1244,6 +2203,11 @@ function renderWeather(sunToday, weatherData, airQuality) {
     const aqi = airQuality.us_aqi;
     const aqiNote = aqi == null ? "" : aqi > 150 ? " (unhealthy - expect washed-out color)" : aqi > 100 ? " (elevated haze)" : aqi > 50 ? " (moderate)" : " (clean air)";
     rows.push(["cloud", "Air quality (PM2.5)", `${airQuality.pm2_5.toFixed(0)} µg/m³${aqiNote}`]);
+  }
+  if (airQuality && typeof airQuality.aerosol_optical_depth === "number") {
+    const aod = airQuality.aerosol_optical_depth;
+    const aodNote = aod > 0.6 ? " (heavy - likely muting color)" : aod > 0.12 ? " (light haze - can deepen color)" : " (clear column)";
+    rows.push(["cloud", "Atmospheric haze (AOD)", `${aod.toFixed(2)}${aodNote}`]);
   }
   const tbody = document.querySelector("#weather-table tbody");
   tbody.innerHTML = rows.map(([icon, k, v], i) =>
@@ -1278,8 +2242,8 @@ function renderBarometer(current, trend) {
   ).join("");
 }
 
-function renderBird(score) {
-  animateNumber(document.getElementById("bird-score"), score.total);
+function renderBird(score, instant) {
+  animateNumber(document.getElementById("bird-score"), score.total, { instant });
   const verdictEl = document.getElementById("bird-verdict");
   verdictEl.textContent = score.verdict;
   verdictEl.className = "big-stat small tier-" + score.tier;
@@ -1291,6 +2255,20 @@ function renderBird(score) {
   grid.innerHTML = Object.entries(score.factors).map(([k, v], i) =>
     `<div class="factor" style="--stagger-delay:${i * 45}ms"><div class="fname">${k}</div><div class="fval">${v}</div></div>`
   ).join("");
+
+  // Same "legendary" treatment as the sunrise/sunset rings (same threshold
+  // used by birdKeyForTotal's top Shoot Log rating tier: >=950 on the
+  // 0-1000 scale), applied to the meter bar instead of a ring. Keyed by
+  // calendar date, same pattern as the light legendary keys, so it re-fires
+  // once per day the score newly crosses into legendary territory rather
+  // than once ever.
+  const barEl = document.getElementById("bird-meter-bar");
+  const badgeEl = document.getElementById("epic-badge-bird");
+  const now = state.now || new Date();
+  const dateKey = now.toISOString().slice(0, 10);
+  const isBirdLegendary = score.total >= 950;
+  applyEpicUi("bird", isBirdLegendary, barEl, badgeEl, dateKey, instant,
+    "Legendary bird activity", "Bird activity right now is forecast well above normal - worth getting out there.", "meter-epic");
 }
 
 function renderAbout() {
@@ -1302,29 +2280,43 @@ function renderAbout() {
 
     <h3>Direction tab (compass)</h3>
     <p>A plain compass dial showing where the sun sits in the sky: altitude (height above the horizon; negative means it's below the horizon) and azimuth (compass bearing, 0-360 degrees clockwise from north). The needle points along that bearing so you can physically face the right direction before the light shows up. Drag the slider or use the date arrows to preview any time, or tap the clock icon to snap back to the live moment. This is intentionally a compass, not a street map. A real map needs a paid tile subscription that would either raise the price or add an ongoing cost this app isn't built to carry, so it sticks to the same offline astronomy math used everywhere else instead.</p>
+    <p>The dial also marks where the sun will actually be: a sun-icon dot for sunrise and one for sunset, plus a short teal arc on each side spanning how much the bearing shifts during blue hour (nautical dawn to dawn at sunrise, dusk to nautical dusk at sunset). These track whichever day is shown, so paging the day arrows moves them too, and they're calculated the same way as everything else here - real solar position for that exact moment, not an approximation.</p>
+
+    <h3>Live compass</h3>
+    <p>Tap "Enable live compass" on the Direction tab and the whole dial turns to match which way your phone is physically pointing, using its compass sensor, instead of always showing north at the top. The sun's needle stays at its true bearing on the dial, so once you turn until the needle lines up with the fixed marker at the top of the dial, you're facing exactly where the sun sits. A small badge appears when you're lined up within about 8 degrees. This needs a phone with a compass sensor and a secure connection; iPhones will ask for a one-time permission tap (an Apple privacy requirement, not optional), and it does nothing at all on a desktop or laptop, which has no compass hardware to read.</p>
+
+    <h3>Sunset/sunrise photo score</h3>
+    <p>In the Shoot Log, adding a photo runs a color analysis entirely on your device: it downsamples the image, measures average color saturation and how much of it falls in warm orange/pink/red tones, and combines those into a 0-100 score on the same scale as the sunrise/sunset quality prediction above, so the two can be compared directly. That score pre-fills the "Light quality - actually" dropdown as a starting guess. <strong>Use the raw, unedited photo</strong> for this - a filtered or edited photo scores however it now looks after editing, not how the sky actually looked, since the analysis has no way to know a filter was applied.</p>
+    <p>Be clear-eyed about what this is: a color heuristic, not scene recognition. It looks at the whole photo, not just the sky, so a shot with a lot of dark foreground, a bird, or branches in frame will score lower even if the sky itself was vivid, and a filtered or edited photo scores however it now looks. That's exactly why it only pre-fills a suggestion instead of writing straight into calibration; always check the pre-filled rating and correct it if it doesn't match what you actually saw before saving, since a wrong rating there would otherwise teach the app the wrong lesson.</p>
 
     <h3>Sunrise/sunset quality score (0-100%)</h3>
     <p>This predicts how colorful the sky is likely to look, not just whether the sun is up. Three real inputs go into it, all pulled from Open-Meteo's weather data for the exact hour of sunrise or sunset:</p>
     <p><strong>High and mid-level clouds:</strong> these are what actually catch sunlight and turn it into color. A moderate amount (roughly a third to half the sky) scores highest. A completely clear sky has nothing to light up, and a fully overcast sky blocks the show entirely, so both score lower.</p>
     <p><strong>Low clouds:</strong> these sit right on the horizon and block sunlight before it can reach anything, regardless of what the high and mid clouds are doing. More low cloud always pulls the score down.</p>
     <p><strong>Humidity:</strong> haze in humid air scatters and washes out color, so higher humidity quietly lowers the score.</p>
+    <p><strong>Aerosol optical depth (AOD):</strong> a real measurement of how much smoke, dust, or general haze is suspended in the whole air column, from Open-Meteo's air quality model. Its effect is genuinely two-sided, not a simple penalty: a light-to-moderate amount actually tends to deepen sunset reds and oranges (this is why sunsets often look more dramatic downwind of wildfire smoke or a dust event), while a heavy load gets thick enough to flatten color into a murky haze instead. The Weather &amp; Exposure card shows the current AOD reading directly, alongside a plain-language note on which way it's pulling.</p>
     <p>This is the same basic approach dedicated sunset-prediction apps use, calculated here from the raw weather data instead of a hidden formula.</p>
+
+    <h3>Golden Hour Intensity</h3>
+    <p>A separate 0-100 score from the sunrise/sunset quality percentage above, because it measures something different: quality is about whether the sky itself shows color, which wants some cloud to catch the light. This score is about whether the direct, low-angle, warm sunlight is strong and unobstructed right now - the light actually used for exposure and white balance - which wants a clear sky in the sun's direction instead.</p>
+    <p>It's only active while the sun's elevation is within the same -0.833&deg; to 6&deg; band already used for the golden hour times shown above, combining how centered the sun is in that window, how much total cloud cover is blocking direct light (steep falloff past ~30-60% cover), and the same aerosol effect described below. It also shows an estimated color temperature in Kelvin, from a simplified physical model of how atmospheric path length warms the direct beam as the sun gets lower - not a spectroradiometer reading, and it doesn't know the local aerosol mix, so treat it as a ballpark for white balance, not a certified one.</p>
+
+    <h3>Legendary conditions badge</h3>
+    <p>A score of 95 or higher gets a distinct "Legendary conditions" treatment on the Dashboard - a pulsing glow on the ring, a badge, and a one-time burst/sound when it's first detected for that sunrise or sunset - separate from the everyday "Great" label (75+). It's set noticeably higher on purpose: a 200,000-sample simulation of realistic cloud/humidity/aerosol combinations against this exact formula puts "Great" at roughly the top 9-10% of conditions, and 95+ narrower still - reserved for a small handful of truly exceptional evenings, not a regular occurrence. It's still reachable (textbook-ideal inputs hit 100). It still shows up on the 7-day Outlook too, as a small flame mark next to the score, without the animation.</p>
 
     <h3>Terrain (hills, ridges, bluffs nearby)</h3>
     <p>A cloud-only prediction assumes flat ground in every direction, which is wrong if you're near real hills or mountains. This app checks real elevation data around your sunrise and sunset direction and figures out if anything tall is in the way. If it finds a ridge, ridge line, or bluff, it shows you the actual time the sun disappears behind it or clears it, which can be noticeably different from the flat-ground time and directly affects how long you actually have usable light to shoot in.</p>
     <p>One thing this deliberately does not do: lower your color-quality score. Sky color develops from sunlight scattering through the atmosphere, which keeps happening whether or not a hill blocks your direct view of the sun itself. A mountain sunset is a different shot (silhouettes, layered light) but not a worse one for color.</p>
 
-    <h3>Weather &amp; exposure card</h3>
+    <h3>Weather card</h3>
     <p>Everything on this card comes from <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a>, a free public weather service (no paid subscription behind it), except air quality which comes from Open-Meteo's separate air quality service. Here's what each row means and why it's here:</p>
-    <p><strong>Cloud cover:</strong> how much of the sky is covered, used for the exposure/ISO suggestion below.</p>
+    <p><strong>Cloud cover:</strong> how much of the sky is covered.</p>
     <p><strong>Wind:</strong> current wind speed. Matters for handholding a long lens steady and is one of the inputs to the bird activity score.</p>
     <p><strong>Temperature:</strong> current air temperature. Extreme cold or heat both affect gear (batteries drain faster in cold) and bird behavior.</p>
     <p><strong>Humidity:</strong> current relative humidity, also used in the sunrise/sunset color score above.</p>
     <p><strong>UV index:</strong> how strong the sun's ultraviolet light is right now. Useful for knowing when harsh midday light will be hardest to work with, and for basic sun protection in the field.</p>
     <p><strong>Visibility:</strong> how far you can see through the air right now. Low visibility means haze or fog, which flattens color and contrast in photos even on an otherwise "clear" day.</p>
     <p><strong>Air quality (PM2.5):</strong> a measure of fine particle pollution in the air. Higher readings mean more atmospheric haze, which washes out sunset color and contrast the same way fog does, just from smoke or pollution instead of water vapor.</p>
-    <p>The suggested ISO range assumes you're using a fast shutter speed for sharp bird-in-flight shots (roughly 1/1600 to 1/2500 of a second), so ISO is the setting that has to absorb whatever light is available. It's a starting point based on sun angle and cloud cover, not a light-meter reading off your actual scene.</p>
-
     <h3>Barometer</h3>
     <p>Air pressure gets its own card because it's the one weather reading that actually feeds the bird activity score below, not just a sky description. "Current pressure" is today's reading, shown in inches of mercury (inHg) by default since that's what most US home barometers and weather reports use, with hectopascals (hPa) available as an option in Settings; for reference, average sea-level pressure is about 29.92 inHg (1013 hPa). "3-hour trend" compares right now to three hours ago, and it's this trend, not the raw number, that matters for bird behavior.</p>
     <p>A falling trend usually means a weather front is approaching, and birds tend to feed more aggressively beforehand to build up reserves, so the verdict reads "Falling" and activity tends to pick up. A sharply rising trend usually means a front just passed and things are settling into calm, stable air, so activity tends to quiet down for a while. Anything in between reads "Steady," meaning no strong signal either way.</p>
@@ -1338,7 +2330,8 @@ function renderAbout() {
     <p><strong>2. Current weather.</strong> Several real effects are combined here: strong wind (birds shelter rather than fly or forage in wind above about 20 km/h/12 mph), active rain (suppresses flight and foraging), a burst of extra activity right after rain stops (rain brings worms and insects to the surface, which is a well-known trigger for ground-feeding birds like robins), reduced activity in dense fog (birds that rely on sight to forage or soar are hampered by poor visibility), and less of a midday slowdown on warm, overcast days (direct sun on a hot day drives birds to rest in shade, and cloud cover removes that pressure). During spring and fall migration, wind direction is also checked: a tailwind in the direction birds are migrating gives a boost, since wind support is one of the best-documented predictors of when birds choose to migrate.</p>
     <p><strong>3. Barometric pressure trend.</strong> Explained above in the Barometer section: falling pressure ahead of a front tends to increase foraging activity, sharply rising pressure after a front tends to quiet things down.</p>
     <p><strong>4. Season.</strong> Spring (April-May) and fall (September-October) get a boost for Northern Hemisphere migration season, when far more species are moving and overall activity is higher. Summer breeding season is moderately active. Winter is the lowest baseline, though this varies a lot by species and region.</p>
-    <p>This model is tuned for birds that are active by day, like songbirds, woodpeckers, raptors, and waterfowl. It is not built for owls or birds that migrate at night, which is why the score never fully bottoms out to zero after dark: it accounts for the fact that some nocturnal activity always exists, without pretending to predict it accurately.</p>
+    <p>This model is tuned for birds that are active by day, like songbirds, woodpeckers, raptors, and waterfowl - it is not built for owls or other non-migratory nocturnal behavior, which is why the score never fully bottoms out to zero after dark outside migration season: it accounts for the fact that some nocturnal activity always exists, without pretending to predict it accurately.</p>
+    <p>The one nocturnal exception: during the spring (roughly early April-late May) and fall (roughly early September-mid November) migration windows, the score adds a real night-time bump timed to when radar-tracked nocturnal migration traffic (the same signal Cornell's BirdCast is built on) typically peaks - a few hours after full dark, tapering off well before dawn. That's why an evening check well past sunset during migration season can score meaningfully higher than the same time of night the rest of the year.</p>
 
     <h3>Calibration: teaching the app your own results</h3>
     <p>Every prediction above is a general model. Calibration is what makes it start reflecting reality at your own locations. Here's how it works: every time you log a shoot, you can rate what the light and bird activity were actually like. The app compares your rating against exactly what it had predicted at that moment. Once you've rated at least 3 shoots, it works out the average difference between predicted and actual, and starts applying that difference as a correction to every future prediction. Light-quality corrections are capped at 25 percentage points either direction, and bird-activity corrections are capped at 300 points (out of 1000), so a handful of unusual days can't swing things too far.</p>
@@ -1403,7 +2396,7 @@ function renderLog(highlightFirst) {
   const tbody = document.querySelector("#log-table tbody");
   renderCalibStatus();
   if (entries.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:24px 0;">No shoots logged yet - conditions at the time of your next entry will be captured automatically.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" style="color:var(--muted);text-align:center;padding:24px 0;">No shoots logged yet - conditions at the time of your next entry will be captured automatically.</td></tr>`;
     return;
   }
   const cap = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
@@ -1415,6 +2408,7 @@ function renderLog(highlightFirst) {
       <td>${e.sunPhase || ""}</td>
       <td>${e.birdScore ?? ""}</td>
       <td>${cap(e.actualLightLabel)}</td>
+      <td>${typeof e.photoScore === "number" ? e.photoScore + " (" + cap(e.photoTier) + ")" : ""}</td>
       <td>${cap(e.actualBirdLabel)}</td>
       <td>${e.notes || ""}</td>
       <td><button data-idx="${i}" class="del-log">x</button></td>
@@ -1449,10 +2443,11 @@ function renderCalibStatus() {
 
 function exportCsv() {
   const entries = loadLog();
-  const header = ["timestamp", "species", "gear", "sun_phase", "bird_score", "predicted_light_pct", "actual_light", "predicted_bird_score", "actual_bird", "notes"];
+  const header = ["timestamp", "species", "gear", "sun_phase", "bird_score", "predicted_light_pct", "actual_light", "photo_score", "photo_score_tier", "predicted_bird_score", "actual_bird", "notes"];
   const rows = entries.map(e => [
     new Date(e.ts).toISOString(), e.species, e.gear || "", e.sunPhase || "", e.birdScore ?? "",
-    e.predictedLight ?? "", e.actualLightLabel || "", e.predictedBird ?? "", e.actualBirdLabel || "",
+    e.predictedLight ?? "", e.actualLightLabel || "", e.photoScore ?? "", e.photoTier || "",
+    e.predictedBird ?? "", e.actualBirdLabel || "",
     (e.notes || "").replace(/"/g, '""')
   ]);
   const csv = [header, ...rows].map(r => r.map(f => `"${f}"`).join(",")).join("\n");
@@ -1465,6 +2460,265 @@ function exportCsv() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// ---------- Sunset/sunrise photo scoring ----------
+// A plain color-pixel heuristic, not real image recognition: it samples the
+// whole photo (downscaled for speed), converts each pixel to HSL, and
+// combines average color saturation with how much of the image falls in
+// warm orange/pink/red hues into a single 0-100 score using the exact same
+// scale as the sunrise/sunset quality prediction, so the two are directly
+// comparable. It runs entirely on-device via the Canvas API - no photo ever
+// leaves the phone or gets uploaded anywhere.
+//
+// Known blind spots, on purpose kept simple rather than pretending to be
+// smarter than it is: a photo dominated by a dark foreground (branches, a
+// bird in frame, a silhouette) pulls the score down even if the sky itself
+// was vivid, since there's no attempt to detect and exclude non-sky pixels.
+// A filtered/edited photo will score however it now looks, not how the sky
+// actually looked. This is exactly why its result only pre-fills the rating
+// dropdown instead of writing straight into calibration - a person confirms
+// it before it can influence future predictions.
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0, s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h *= 60;
+  }
+  return { h, s, l };
+}
+
+function photoScoreToTier(score) {
+  if (score >= 78) return "great";
+  if (score >= 55) return "good";
+  if (score >= 30) return "fair";
+  return "poor";
+}
+const PHOTO_TIER_LABELS = { poor: "Mostly flat/gray sky", fair: "Muted color", good: "Colorful", great: "Vivid" };
+
+// How much local pixel-to-pixel contrast an image has, 0-255ish scale -
+// used below to guess whether a photo is plausibly a sky/sunset at all
+// before trusting its color score. A sunset, an open sky, even a hazy or
+// cloudy horizon is dominated by smooth, slow-changing gradients with very
+// little edge detail; a face, a document, a room, an object close-up, a
+// bird in frame, etc all have dramatically more local contrast. This is
+// NOT real scene recognition - a badly out-of-focus or heavily blurred
+// non-sky photo can still slip through - but it catches the ordinary case
+// this app was actually seeing: an unrelated warm/saturated photo (a wood
+// floor, a orange wall, a face in warm light) getting auto-scored as if it
+// were a vivid sky just because the colors happened to be warm.
+// Horizontal-only on purpose: a real sky gradient changes smoothly TOP TO
+// BOTTOM (that's just what a sky does, sunrise or not) but stays essentially
+// uniform LEFT TO RIGHT at any given height. Counting vertical differences
+// as "detail" (an earlier version of this did) penalized every normal sky
+// gradient right along with real texture, and got noticeably worse once the
+// horizon-cropped region above started running close to the actual treeline
+// - the natural color shift into haze near a horizon has real vertical
+// change that isn't foreground detail. Horizontal variation within a row
+// isn't part of a sky's normal behavior, so it's what's left to flag real
+// texture (foliage, a face, text) without also flagging the sky being a sky.
+function averageEdgeEnergy(lum, W, H) {
+  let edgeSum = 0, edgeCount = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W - 1; x++) {
+      edgeSum += Math.abs(lum[y * W + x] - lum[y * W + x + 1]);
+      edgeCount++;
+    }
+  }
+  return edgeCount ? edgeSum / edgeCount : 0;
+}
+// A global average alone missed real non-sky photos where most of the frame
+// is smooth (a plain backdrop, a shirt, a wall) and the actual detail - a
+// face's eyes/mouth/hairline, a collar line - only occupies a small part of
+// it: averaged across the whole image that detail gets diluted below the
+// global threshold even though it's obviously there. This walks a grid of
+// small blocks and reports what FRACTION of them are individually busy,
+// rather than just the single busiest one - a lone branch/leaf sprig poking
+// into a corner of an otherwise real sky (common in nature framing) lights
+// up one or two blocks and shouldn't fail the whole photo, but a face or a
+// frame genuinely full of detail lights up many of them.
+function busyBlockFraction(lum, W, H, cols, rows, perBlockThreshold) {
+  let busy = 0, total = 0;
+  const bw = Math.max(1, Math.floor(W / cols)), bh = Math.max(1, Math.floor(H / rows));
+  for (let by = 0; by < H; by += bh) {
+    for (let bx = 0; bx < W; bx += bw) {
+      let sum = 0, n = 0;
+      const yEnd = Math.min(H, by + bh), xEnd = Math.min(W - 1, bx + bw);
+      for (let y = by; y < yEnd; y++) {
+        for (let x = bx; x < xEnd; x++) {
+          sum += Math.abs(lum[y * W + x] - lum[y * W + x + 1]);
+          n++;
+        }
+      }
+      if (n) {
+        total++;
+        if (sum / n > perBlockThreshold) busy++;
+      }
+    }
+  }
+  return total ? busy / total : 0;
+}
+// Tuned conservatively against real photo textures: even a busy, cloud-
+// filled or textured sky stays well under this, while an ordinary
+// non-sky subject (anything with edges, text, foliage detail, a face)
+// sits well above it.
+const SKY_EDGE_THRESHOLD = 8;
+// A block counts as "busy" past this per-block horizontal edge value -
+// higher than the whole-region average threshold since any single small
+// block naturally reads noisier than a big average.
+const BUSY_BLOCK_THRESHOLD = 10;
+// A real sky, even a dramatic/patchy one, can still have ONE or two busy
+// blocks (a branch tip or leaf sprig poking into a corner, common in nature
+// framing) without actually being a non-sky photo. A face, a document, a
+// frame genuinely full of detail lights up a much larger share of the grid.
+const SKY_MAX_BUSY_FRACTION = 0.12;
+// Skin-tone detection catches the case edge-energy alone can miss entirely:
+// a smooth, evenly-lit portrait (studio lighting, a plain backdrop) where a
+// face has almost no internal edge detail once downscaled, but is still
+// obviously a face - not a sky - because of where its color sits and how
+// it's arranged in the frame. A face is a blob concentrated toward the
+// HORIZONTAL center (portraits are subject-centered left-to-right); a sky's
+// color, even when it happens to pass through a skin-like hue somewhere in
+// its gradient (a very normal blue-to-pink-to-peach sunset band), varies by
+// VERTICAL position, not horizontal, so it shows up just as much toward the
+// left/right edges as the center at any given height. Comparing left/right
+// edge columns against center columns - across the SAME rows for both, so
+// a sky's normal top-to-bottom color change never factors in - is what
+// actually tells a face apart from a same-hued sky gradient band.
+function skinBlobCheck(data, W, H) {
+  const cx0 = Math.floor(W * 0.25), cx1 = Math.ceil(W * 0.75);
+  let centerSkin = 0, centerTotal = 0, edgeSkin = 0, edgeTotal = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const { h, s, l } = rgbToHsl(data[i], data[i + 1], data[i + 2]);
+      const isSkin = h >= 4 && h <= 35 && s >= 0.15 && s <= 0.62 && l >= 0.25 && l <= 0.85;
+      if (x >= cx0 && x < cx1) { centerTotal++; if (isSkin) centerSkin++; }
+      else { edgeTotal++; if (isSkin) edgeSkin++; }
+    }
+  }
+  const centerFrac = centerTotal ? centerSkin / centerTotal : 0;
+  const edgeFrac = edgeTotal ? edgeSkin / edgeTotal : 0;
+  return centerFrac >= 0.15 && centerFrac >= edgeFrac * 2.2;
+}
+
+// Finds where the actual sky stops and foreground detail (a treeline, tall
+// grass/foliage, a horizon silhouette, a bird) starts, instead of assuming a
+// fixed fraction of the frame. A fixed cutoff either clips real sky off a
+// photo where foreground reaches unusually high in frame, or leaves too much
+// foreground in when it doesn't - both produce wrong results. This scans
+// row by row from the top and reads horizontal-only edge energy per row (a
+// gradient sky row is smooth left-to-right even though it changes smoothly
+// top-to-bottom; foliage/branches are busy left-to-right), stopping at the
+// first row that's clearly no longer smooth.
+const ROW_EDGE_CUTOFF = 6;
+function findSkyBottom(lum, W, H) {
+  for (let y = 0; y < H; y++) {
+    let sum = 0;
+    for (let x = 0; x < W - 1; x++) sum += Math.abs(lum[y * W + x] - lum[y * W + x + 1]);
+    if (sum / (W - 1) > ROW_EDGE_CUTOFF) return y;
+  }
+  return H;
+}
+
+function analyzeSunsetPhoto(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const W = 140, H = 94; // downscaled for speed, but not so far that real detail (a face, text, foliage) gets smoothed away into looking sky-flat
+        const canvas = document.createElement("canvas");
+        canvas.width = W; canvas.height = H;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, W, H);
+        const data = ctx.getImageData(0, 0, W, H).data;
+
+        // Full-frame luminance first (needed to find the horizon), and hue/
+        // sat cached per pixel so the second pass over just the sky rows
+        // doesn't recompute rgbToHsl.
+        const lum = new Float32Array(W * H);
+        const hueArr = new Float32Array(W * H);
+        const satArr = new Float32Array(W * H);
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const i = (y * W + x) * 4;
+            const r = data[i], g = data[i + 1], b = data[i + 2];
+            const { h, s } = rgbToHsl(r, g, b);
+            hueArr[y * W + x] = h;
+            satArr[y * W + x] = s;
+            lum[y * W + x] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          }
+        }
+
+        // Sky vs. non-sky is judged only above the detected horizon, not the
+        // whole photo. A huge share of real sunrise/sunset shots - basically
+        // all wildlife/nature framing - put a detailed silhouette (branches,
+        // grass, a treeline, a bird) across the BOTTOM of the frame under a
+        // smooth sky above it, and that foreground can reach well over half
+        // the frame height. Scanning the whole image, or even a fixed top
+        // fraction, for "is there any real detail anywhere" rejected those
+        // as if they were an ordinary detailed photo, when the actual sky
+        // portion was a completely genuine, smooth gradient.
+        const skyH = findSkyBottom(lum, W, H);
+
+        let satSum = 0, warmCount = 0, count = 0;
+        for (let y = 0; y < skyH; y++) {
+          for (let x = 0; x < W; x++) {
+            const idx = y * W + x;
+            satSum += satArr[idx];
+            // Widened to include violet/magenta (roughly 250-300), not just
+            // orange-red-pink - a purple "alpenglow" dawn/dusk sky is a very
+            // real, very photogenic sunrise/sunset color, and scoring it as
+            // if it were an ordinary blue daytime sky just because it isn't
+            // literally orange badly understated genuinely vivid photos.
+            const isWarmHue = hueArr[idx] <= 40 || hueArr[idx] >= 250;
+            if (isWarmHue && satArr[idx] >= 0.15) warmCount++;
+            count++;
+          }
+        }
+        // A real sky photo has a meaningfully sized clear region, not just a
+        // sliver above someone's hairline or a shelf's edge - if detail
+        // starts almost immediately, this was never a sky shot to begin with.
+        const hasEnoughSky = skyH >= H * 0.22;
+        const avgSaturation = count ? satSum / count : 0;
+        const warmFraction = count ? warmCount / count : 0;
+        const avgEdge = count ? averageEdgeEnergy(lum, W, skyH) : 999;
+        const busyFraction = count ? busyBlockFraction(lum, W, skyH, 10, Math.max(2, Math.round(skyH / 12)), BUSY_BLOCK_THRESHOLD) : 1;
+        const hasSkinBlob = count ? skinBlobCheck(data, W, skyH) : false;
+        const looksLikeSky = hasEnoughSky && avgEdge < SKY_EDGE_THRESHOLD && busyFraction <= SKY_MAX_BUSY_FRACTION && !hasSkinBlob;
+
+        const score = Math.max(0, Math.min(100, Math.round(avgSaturation * 55 + warmFraction * 45)));
+        const tier = photoScoreToTier(score);
+        URL.revokeObjectURL(url);
+        resolve({
+          score, tier, label: PHOTO_TIER_LABELS[tier],
+          avgSaturationPct: Math.round(avgSaturation * 100),
+          warmPct: Math.round(warmFraction * 100),
+          looksLikeSky,
+          avgEdge: Math.round(avgEdge * 10) / 10,
+          busyFraction: Math.round(busyFraction * 1000) / 1000,
+          skyFraction: Math.round((skyH / H) * 100) / 100,
+          hasSkinBlob,
+          previewUrl: canvas.toDataURL("image/jpeg", 0.7)
+        });
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        reject(err);
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not read that image file")); };
+    img.src = url;
+  });
 }
 
 // ---------- Main refresh ----------
@@ -1493,6 +2747,17 @@ function setStaleBanner(visible, text) {
   if (!banner) return;
   banner.hidden = !visible;
   if (visible) document.getElementById("stale-banner-text").textContent = text;
+}
+// Shows/hides the unmissable "you're on the default location" banner. Every
+// number on the dashboard IS correct for whatever coordinate is active -
+// this exists because the coordinate itself silently staying at the Kansas
+// fallback (GPS denied/no signal/timed out, nothing ever manually set) is
+// what actually looked like "wrong data" - now it's surfaced instead of
+// hidden behind normal-looking cards.
+function syncDefaultLocBanner() {
+  const banner = document.getElementById("default-loc-banner");
+  if (!banner) return;
+  banner.hidden = !isDefaultLocation(state.loc);
 }
 
 async function refreshAll(opts) {
@@ -1553,21 +2818,45 @@ async function refreshAll(opts) {
     state.airQuality = airQuality;
 
     // re-render with the location's real UTC offset now that we have it
-    renderSun(loc, now, sunToday, sunTomorrow, weatherData.utc_offset_seconds, horizon);
-    renderTodayQuality(sunToday.times, weatherData, horizon);
-    renderOutlook(loc, weatherData, horizon);
-    renderWeather(sunToday, weatherData, airQuality);
+    const instant = !playSound;
+    let score;
+    withSilentRefreshFx(instant, () => {
+      renderSun(loc, now, sunToday, sunTomorrow, weatherData.utc_offset_seconds, horizon);
+      renderTodayQuality(sunToday.times, weatherData, horizon, airQuality, instant);
+      renderGoldenHour(loc, now, sunToday.elevationDeg, weatherData, airQuality, sunToday.times, sunTomorrow.times);
+      renderOutlook(loc, weatherData, horizon, airQuality);
+      renderWeather(sunToday, weatherData, airQuality);
 
-    const score = computeBirdScore(now, sunToday.times, weatherData, sunToday.elevationDeg);
-    state.birdScore = score;
-    renderBird(score);
+      score = computeBirdScore(now, sunToday.times, weatherData, sunToday.elevationDeg);
+      state.birdScore = score;
+      renderBird(score, instant);
+    });
 
     setStaleBanner(false);
     saveGoodState(now, loc, weatherData, score, horizon, airQuality);
     if (playSound) feedbackRefreshDone();
     fireShutterFlash(playSound);
-    fireParticleBurst(document.getElementById("bird-fill"), qualityColor(score.tier === "great" ? "Great" : score.tier === "good" ? "Good" : score.tier === "fair" ? "Fair" : "Poor"));
-    document.querySelectorAll(".grid .card").forEach(popEl);
+    // Every card gets its own tier-colored burst on a real refresh now, not
+    // just the bird meter - each guarded by fireParticleBurst's own
+    // hidden-element check, so a card that isn't the active tab (Outlook,
+    // Direction) just silently skips its burst instead of firing one at a
+    // stray 0,0 position. Kept at a smaller particle count than the bird
+    // meter's signature 14 so five-plus simultaneous bursts read as a
+    // coordinated flourish rather than clutter. Gated to a real
+    // user-triggered refresh only - a silent background refresh should be
+    // completely undetectable, not throw confetti at whatever tab happens
+    // to be open.
+    if (playSound) {
+      fireParticleBurst(document.getElementById("bird-fill"), colorForTier(score.tier));
+      fireParticleBurst(document.getElementById("ring-sunrise"), qualityColor(state.qSunrise ? state.qSunrise.label : "Poor"), 9);
+      fireParticleBurst(document.getElementById("ring-sunset"), qualityColor(state.qSunset ? state.qSunset.label : "Poor"), 9);
+      const goldSwatchColor = document.getElementById("golden-cct-swatch").style.background || "#c17a52";
+      fireParticleBurst(document.getElementById("golden-fill"), goldSwatchColor, 9);
+      const barometerTierClass = [...document.getElementById("barometer-verdict").classList].find(c => c.startsWith("tier-"));
+      fireParticleBurst(document.getElementById("barometer-verdict"), colorForTier(barometerTierClass ? barometerTierClass.slice(5) : ""), 9);
+      fireParticleBurst(document.querySelector("#card-weather h2"), "#1f6b5c", 9);
+      document.querySelectorAll(".grid .card").forEach(popEl);
+    }
 
     statusEl.textContent = "Updated " + now.toLocaleTimeString();
     liveTick(); // refresh the live-clock line immediately - otherwise it can
@@ -1585,11 +2874,14 @@ async function refreshAll(opts) {
       state.weather = cached.weatherData;
       state.horizon = cached.horizon;
       state.birdScore = cached.score;
-      renderSun(loc, now, sunToday, sunTomorrow, cached.weatherData.utc_offset_seconds, cached.horizon);
-      renderTodayQuality(sunToday.times, cached.weatherData, cached.horizon);
-      renderOutlook(loc, cached.weatherData, cached.horizon);
-      renderWeather(sunToday, cached.weatherData);
-      renderBird(cached.score);
+      withSilentRefreshFx(!playSound, () => {
+        renderSun(loc, now, sunToday, sunTomorrow, cached.weatherData.utc_offset_seconds, cached.horizon);
+        renderTodayQuality(sunToday.times, cached.weatherData, cached.horizon, cached.airQuality, !playSound);
+        renderGoldenHour(loc, now, sunToday.elevationDeg, cached.weatherData, cached.airQuality, sunToday.times, sunTomorrow.times);
+        renderOutlook(loc, cached.weatherData, cached.horizon, cached.airQuality);
+        renderWeather(sunToday, cached.weatherData);
+        renderBird(cached.score, !playSound);
+      });
       setStaleBanner(true, `No connection - showing weather/bird data from ${cachedAgeMin < 1 ? "under a minute" : cachedAgeMin + " min"} ago.`);
       statusEl.textContent = "Weather unavailable (" + err.message + ") - showing last known reading.";
     } else {
@@ -1637,8 +2929,14 @@ function liveTick() {
   if (state.weather) {
     const score = computeBirdScore(now, sunToday.times, state.weather, sunToday.elevationDeg);
     state.birdScore = score;
-    renderBird(score);
+    renderBird(score, true); // per-second clock tick, never animated
   }
+  // Elevation moves every second; weather/aerosol only refresh every few
+  // minutes, so re-run the intensity calc on every tick using whatever
+  // weather/air-quality data is already cached, rather than waiting on the
+  // next full refresh to reflect the sun having climbed or dropped.
+  const tomorrow = new Date(now.getTime() + 86400000);
+  renderGoldenHour(loc, now, sunToday.elevationDeg, state.weather, state.airQuality, sunToday.times, computeSun(loc, tomorrow).times);
 
   document.getElementById("live-clock-text").textContent =
     "Live - " + now.toLocaleTimeString() + (state.weather ? "" : " (weather offline)");
@@ -1647,19 +2945,35 @@ function liveTick() {
   // the visible tab, so switching to it never shows a stale moment - cheap,
   // since it's the same solar-position call already made above.
   if (state.direction.mode === "live") renderDirection();
+
+  // Keeps the Shoot Log's rating dropdowns tracking the live prediction
+  // while the tab sits open (e.g. someone has it up while waiting for
+  // golden hour) - autoFillLogRatings() itself is a no-op for any dropdown
+  // the person has already touched or set.
+  autoFillLogRatings();
 }
 
 function showWeatherUnavailable() {
   setStaleBanner(false);
-  const expEl = document.getElementById("exposure-verdict");
-  expEl.textContent = "No connection";
-  expEl.className = "big-stat";
-  document.getElementById("iso-suggestion").textContent = "Weather data unavailable";
   document.querySelector("#weather-table tbody").innerHTML = "";
   document.getElementById("q-sunrise").textContent = "--";
   document.getElementById("q-sunset").textContent = "--";
   document.getElementById("q-sunrise-label").textContent = "n/a";
   document.getElementById("q-sunset-label").textContent = "n/a";
+  document.getElementById("q-sunrise-note").textContent = "";
+  document.getElementById("q-sunset-note").textContent = "";
+  document.getElementById("ring-sunrise").classList.remove("ring-epic");
+  document.getElementById("ring-sunset").classList.remove("ring-epic");
+  document.getElementById("epic-badge-sunrise").setAttribute("hidden", "");
+  document.getElementById("epic-badge-sunset").setAttribute("hidden", "");
+  document.getElementById("golden-verdict").textContent = "--";
+  document.getElementById("golden-verdict").className = "big-stat verdict-line";
+  document.getElementById("golden-sub").textContent = "--";
+  document.getElementById("golden-score").textContent = "--";
+  document.getElementById("golden-fill").style.width = "0%";
+  document.getElementById("golden-cct").textContent = "Color temp: --";
+  document.getElementById("golden-cct-swatch").style.background = "#e8e8e8";
+  document.getElementById("golden-note").textContent = "";
   document.getElementById("bird-score").textContent = "--";
   const sourceEl = document.getElementById("bird-source");
   sourceEl.textContent = "--";
@@ -1745,6 +3059,7 @@ async function geocodePlaceNameMulti(query, count) {
 document.addEventListener("DOMContentLoaded", () => {
   state.loc = loadLocation();
   setLocationLabel();
+  syncDefaultLocBanner();
   if (!state.loc.placeName && (state.loc.label === "GPS" || state.loc.label === "Custom")) refreshPlaceName();
   renderAbout();
   renderLog();
@@ -1763,16 +3078,46 @@ document.addEventListener("DOMContentLoaded", () => {
     state.birdScore = cachedOnLoad.score;
     state.airQuality = cachedOnLoad.airQuality;
     renderSun(state.loc, now0, sunToday0, null, cachedOnLoad.weatherData.utc_offset_seconds, cachedOnLoad.horizon);
-    renderTodayQuality(sunToday0.times, cachedOnLoad.weatherData, cachedOnLoad.horizon);
-    renderOutlook(state.loc, cachedOnLoad.weatherData, cachedOnLoad.horizon);
+    renderTodayQuality(sunToday0.times, cachedOnLoad.weatherData, cachedOnLoad.horizon, cachedOnLoad.airQuality, true);
+    renderGoldenHour(state.loc, now0, sunToday0.elevationDeg, cachedOnLoad.weatherData, cachedOnLoad.airQuality, sunToday0.times, null);
+    renderOutlook(state.loc, cachedOnLoad.weatherData, cachedOnLoad.horizon, cachedOnLoad.airQuality);
     renderWeather(sunToday0, cachedOnLoad.weatherData, cachedOnLoad.airQuality);
-    renderBird(cachedOnLoad.score);
+    renderBird(cachedOnLoad.score, true); // instant - this is the pre-network-trip cached paint, not a user-triggered refresh
     const ageMin = Math.round((now0.getTime() - cachedOnLoad.ts) / 60000);
     setStaleBanner(true, `Loading... showing cached data from ${ageMin < 1 ? "under a minute" : ageMin + " min"} ago until it refreshes.`);
   }
 
   refreshAll();
   liveTick();
+
+  // Default-location banner: visible and unmissable any time the app is
+  // still sitting on the Kansas center-of-US fallback, not just after a
+  // failed silent attempt. This is what was missing before - GPS could fail
+  // (denied, no signal, timed out) with zero UI, leaving current temp,
+  // today's high/low, barometer, and everything else correctly computed for
+  // Kansas while reading as "wrong" to someone looking at Fort Collins data.
+  syncDefaultLocBanner();
+
+  // Auto-attempt GPS on every launch as long as the active location is still
+  // the default fallback (not just on the very first-ever launch) - so
+  // granting permission later, or getting signal back, is picked up on the
+  // next reload without the user having to remember to tap "Use GPS"
+  // themselves. A returning user's own saved/custom/GPS location is never
+  // overridden by this. Denied/unsupported/timed out surfaces a real,
+  // visible message instead of failing silently.
+  if (isDefaultLocation(state.loc) && navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        applyLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude, label: "GPS" });
+        refreshPlaceName();
+      },
+      err => {
+        setLocStatus("Couldn't auto-set your location from GPS (" + err.message + "). Tap \"Use GPS\" above, or type your town/city and hit Set.", "is-error");
+        syncDefaultLocBanner();
+      },
+      { timeout: 8000 }
+    );
+  }
 
   const tempUnitToggle = document.getElementById("temp-unit-toggle");
   if (tempUnitToggle) {
@@ -1861,10 +3206,15 @@ document.addEventListener("DOMContentLoaded", () => {
   const splash = document.getElementById("intro-splash");
   if (splash) splash.addEventListener("animationend", () => splash.remove());
 
+  // No feedbackTap() call here - .tab-btn elements are <button>s, so the
+  // delegated wireTactileFeedback("button") pointerdown handler below
+  // already plays the tap sound the instant a tab is pressed. Calling it
+  // again here on "click" produced a second, slightly-delayed sound on
+  // every tab switch (pointerdown fires immediately on press, click fires
+  // after release).
   const tabOrder = Array.from(document.querySelectorAll(".tab-btn")).map(b => b.dataset.tab);
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
-      feedbackTap();
       const fromIdx = tabOrder.indexOf(document.querySelector(".tab-btn.active").dataset.tab);
       const toIdx = tabOrder.indexOf(btn.dataset.tab);
       document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -1873,14 +3223,20 @@ document.addEventListener("DOMContentLoaded", () => {
       const panel = document.getElementById(btn.dataset.tab);
       panel.classList.add("active", toIdx >= fromIdx ? "dir-fwd" : "dir-back");
       if (btn.dataset.tab === "direction") renderDirection();
+      if (btn.dataset.tab === "log") autoFillLogRatings();
     });
   });
 
   wireDirectionTab();
+  wireLiveCompassButton();
 
   // Tactile feedback (haptic buzz + tap tone + ink ripple) on every button
   // that doesn't already have its own bespoke feedback wired below.
-  wireTactileFeedback(".refresh-btn, .map-layer-btn, .loc-row button, .log-form button, .log-actions button, .tab-btn, .log-actions-btn-solo");
+  // Delegated, so this one call covers every button in the app - present
+  // now and anything rebuilt/added later (log table rows, Outlook rows,
+  // tab buttons, etc) - without needing a second call anywhere else.
+  wireTactileFeedback("button");
+  wireChangeHaptics("select, input[type=range]");
 
   // A soft key-tick on every text field, not just buttons - "keydown" rather
   // than "input" so it fires on backspace/delete too, and skips modifier-only
@@ -1909,6 +3265,67 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // Device notification opt-in. Requesting Notification permission needs a
+  // real user gesture (this click), and can be refused/revoked by the OS at
+  // any time - so "Enable" always re-checks/re-requests rather than trusting
+  // a stale saved "on" state, and the toggle honestly reflects whatever the
+  // browser actually granted, not just what was clicked.
+  const epicToggle = document.getElementById("epic-alerts-toggle");
+  const epicStatusEl = document.getElementById("epic-alerts-status");
+  function setEpicAlertsStatus(text, kind) {
+    if (!epicStatusEl) return;
+    epicStatusEl.textContent = text || "";
+    epicStatusEl.classList.remove("is-error", "is-ok");
+    if (kind) epicStatusEl.classList.add(kind);
+    epicStatusEl.hidden = !text;
+  }
+  function syncEpicToggleUi() {
+    if (!epicToggle) return;
+    const on = loadEpicAlertsEnabled() && "Notification" in window && Notification.permission === "granted";
+    epicToggle.querySelectorAll(".map-layer-btn").forEach(b => {
+      b.classList.toggle("active", (b.dataset.alerts === "on") === on);
+    });
+  }
+  if (epicToggle) {
+    syncEpicToggleUi();
+    epicToggle.querySelectorAll(".map-layer-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const wantsOn = btn.dataset.alerts === "on";
+        if (!wantsOn) {
+          saveEpicAlertsEnabled(false);
+          syncEpicToggleUi();
+          setEpicAlertsStatus("");
+          return;
+        }
+        if (!("Notification" in window)) {
+          setEpicAlertsStatus("This browser doesn't support notifications.", "is-error");
+          syncEpicToggleUi();
+          return;
+        }
+        if (Notification.permission === "granted") {
+          saveEpicAlertsEnabled(true);
+          syncEpicToggleUi();
+          setEpicAlertsStatus("Legendary alerts on - you'll get a notification even if the app isn't open.", "is-ok");
+          return;
+        }
+        if (Notification.permission === "denied") {
+          saveEpicAlertsEnabled(false);
+          syncEpicToggleUi();
+          setEpicAlertsStatus("Notifications are blocked for this app in your browser/OS settings - allow them there, then try again.", "is-error");
+          return;
+        }
+        Notification.requestPermission().then(result => {
+          const granted = result === "granted";
+          saveEpicAlertsEnabled(granted);
+          syncEpicToggleUi();
+          setEpicAlertsStatus(granted
+            ? "Legendary alerts on - you'll get a notification even if the app isn't open."
+            : "Permission wasn't granted, so legendary alerts stayed off.", granted ? "is-ok" : "is-error");
+        });
+      });
+    });
+  }
+
   document.getElementById("refresh-btn").addEventListener("click", () => refreshAll({ manual: true }));
 
   // Feedback for the location search lives right at the search box itself
@@ -1930,12 +3347,31 @@ document.addEventListener("DOMContentLoaded", () => {
     saveLocation(state.loc);
     setLocationLabel();
     await refreshAll();
+    syncDefaultLocBanner();
     // Confirm the fetch actually landed, right at the search box, then let
     // the message fade rather than sit there permanently.
     const label = loc.placeName || `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`;
     setLocStatus(`Showing data for ${label}.`, "is-ok");
     clearTimeout(applyLocation._clearTimer);
     applyLocation._clearTimer = setTimeout(() => setLocStatus("", null), 4000);
+  }
+
+  function requestGps(onDone) {
+    hideSuggestions();
+    if (!navigator.geolocation) {
+      setLocStatus("Geolocation not supported in this browser.", "is-error");
+      return;
+    }
+    setLocStatus("Getting GPS position...", null);
+    navigator.geolocation.getCurrentPosition(pos => {
+      applyLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude, label: "GPS" });
+      refreshPlaceName();
+      setLocStatus("Location set from GPS. Fetching data...", "is-ok");
+      if (onDone) onDone(true);
+    }, err => {
+      setLocStatus("GPS error: " + err.message + ". Try again, or type your town/city and hit Set.", "is-error");
+      if (onDone) onDone(false);
+    });
   }
 
   async function handleSetLocation() {
@@ -2045,48 +3481,164 @@ document.addEventListener("DOMContentLoaded", () => {
     if (suggestBox && !suggestBox.hidden && !suggestBox.contains(e.target) && e.target !== locInputEl) hideSuggestions();
   });
 
-  document.getElementById("use-gps").addEventListener("click", () => {
-    hideSuggestions();
-    if (!navigator.geolocation) {
-      setLocStatus("Geolocation not supported in this browser.", "is-error");
-      return;
-    }
-    setLocStatus("Getting GPS position...", null);
-    navigator.geolocation.getCurrentPosition(pos => {
-      applyLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude, label: "GPS" });
-      refreshPlaceName();
-      setLocStatus("Location set from GPS. Fetching data...", "is-ok");
-    }, err => {
-      setLocStatus("GPS error: " + err.message, "is-error");
+  // Sun & Light ring click-to-expand: same explainQuality() breakdown the
+  // Outlook rows use, just wired to the live dashboard's two rings instead
+  // of a forecast day. Bound once here (not inside renderTodayQuality,
+  // which reruns on every refresh/tick) so the open/closed state a user
+  // left it in survives a background data refresh.
+  ["sunrise", "sunset"].forEach(kind => {
+    const btn = document.getElementById("ring-toggle-" + kind);
+    const detail = document.getElementById("ring-detail-" + kind);
+    const note = document.getElementById("q-" + kind + "-note");
+    if (!btn || !detail) return;
+    btn.addEventListener("click", () => {
+      const isOpen = !detail.hidden;
+      detail.hidden = isOpen;
+      // The short terrain/aerosol note is part of "why is this score what
+      // it is" too - it stays hidden alongside the full breakdown until the
+      // ring is tapped, rather than always showing by default.
+      if (note) note.hidden = isOpen;
+      btn.setAttribute("aria-expanded", String(!isOpen));
+      btn.classList.toggle("is-open", !isOpen);
     });
   });
+
+  document.getElementById("use-gps").addEventListener("click", () => requestGps());
+  const bannerGpsBtn = document.getElementById("default-loc-gps-btn");
+  if (bannerGpsBtn) bannerGpsBtn.addEventListener("click", () => requestGps());
 
   // Whichever of today's sun events (sunrise or sunset) is closer to right
   // now is the one the log entry's "actual light" rating should be judged
   // against - that's the prediction that was actually live at shoot time.
   function nearestPredictedLight() {
-    if (!state.sunTimes || !state.qSunrise || !state.qSunset) return null;
-    const now = state.now || new Date();
-    const dSunrise = Math.abs(now - state.sunTimes.times.sunrise);
-    const dSunset = Math.abs(now - state.sunTimes.times.sunset);
-    return dSunrise <= dSunset ? state.qSunrise.rawScore : state.qSunset.rawScore;
+    const q = nearestSunQ();
+    return q ? q.rawScore : null;
   }
+
+  function setLogStatus(text, kind) {
+    const el = document.getElementById("log-status");
+    if (!el) return;
+    el.textContent = text || "";
+    el.classList.remove("is-error", "is-ok");
+    if (kind) el.classList.add(kind);
+    el.hidden = !text;
+    clearTimeout(setLogStatus._t);
+    if (text) setLogStatus._t = setTimeout(() => { el.hidden = true; }, 4000);
+  }
+
+  const lightSelectEl = document.getElementById("log-actual-light");
+  const birdSelectEl = document.getElementById("log-actual-bird");
+  if (lightSelectEl) lightSelectEl.addEventListener("change", () => { state.logTouched.light = true; });
+  if (birdSelectEl) birdSelectEl.addEventListener("change", () => { state.logTouched.bird = true; });
+  autoFillLogRatings();
+
+  let pendingPhotoScore = null; // set by the photo-analysis handler below, consumed and cleared on next log submit
+
+  const photoInput = document.getElementById("log-photo-input");
+  const photoRemoveBtnHtml = `<button type="button" class="photo-remove-btn" id="photo-remove-btn" aria-label="Remove photo">&times;</button>`;
+
+  // Wipes a selected/analyzed photo back to nothing - for an accidental
+  // upload, or after "that's not a sky photo" below. Also un-does the
+  // photo's own auto-fill of the light rating (if it set one), falling
+  // back to the normal weather-prediction auto-fill instead of leaving a
+  // wrong photo-derived rating sitting in the dropdown.
+  function clearPendingPhoto() {
+    pendingPhotoScore = null;
+    if (photoInput) photoInput.value = "";
+    const resultEl = document.getElementById("photo-score-result");
+    if (resultEl) { resultEl.hidden = true; resultEl.innerHTML = ""; }
+    state.logTouched.light = false;
+    autoFillLogRatings();
+  }
+
+  if (photoInput) {
+    photoInput.addEventListener("change", () => {
+      const file = photoInput.files && photoInput.files[0];
+      const resultEl = document.getElementById("photo-score-result");
+      if (!file || !resultEl) return;
+      resultEl.hidden = false;
+      resultEl.innerHTML = `<span class="photo-score-text">Analyzing photo...</span>`;
+      analyzeSunsetPhoto(file).then(result => {
+        if (!result.looksLikeSky) {
+          // Doesn't look like a sky/sunset photo at all (too much local
+          // detail/contrast for a smooth sky gradient) - don't trust its
+          // color reading enough to auto-fill a rating from it. Leaves
+          // whatever rating was already there (the weather prediction, or
+          // nothing) untouched rather than silently mis-scoring an
+          // unrelated photo.
+          pendingPhotoScore = null;
+          resultEl.innerHTML = `
+            <img src="${result.previewUrl}" alt="">
+            <span class="photo-score-text">This doesn't look like a sky/sunset photo, so it wasn't used to rate anything - pick a rating manually if you'd like.</span>
+            ${photoRemoveBtnHtml}
+          `;
+          return;
+        }
+        pendingPhotoScore = result;
+        // Breakdown of exactly how the 0-100 number was built, not just the
+        // final tier - saturation and warm-hue fraction are weighted 55/45,
+        // so showing both pieces (and the sky region they were measured
+        // over) is what turns "trust me" into something you can actually
+        // check against the photo yourself.
+        const satPts = Math.round(result.avgSaturationPct / 100 * 55);
+        const warmPts = Math.round(result.warmPct / 100 * 45);
+        resultEl.innerHTML = `
+          <img src="${result.previewUrl}" alt="">
+          <span class="photo-score-text">Detected: <strong>${result.label}</strong> (${result.score}/100) &mdash; pre-filled the rating below, change it if it doesn't look right.
+            <details class="photo-score-breakdown">
+              <summary>How this number was calculated</summary>
+              <ul>
+                <li>Sky region analyzed: top ${Math.round(result.skyFraction * 100)}% of the frame (below that was treated as foreground)</li>
+                <li>Color saturation: ${result.avgSaturationPct}% &rarr; ${satPts}/55 pts</li>
+                <li>Warm sunset/sunrise hue (orange through violet): ${result.warmPct}% of that region &rarr; ${warmPts}/45 pts</li>
+                <li>Total: ${satPts} + ${warmPts} = ${result.score}/100</li>
+              </ul>
+            </details>
+          </span>
+          ${photoRemoveBtnHtml}
+        `;
+        const lightSelect = document.getElementById("log-actual-light");
+        if (lightSelect) { lightSelect.value = result.tier; state.logTouched.light = true; }
+      }).catch(() => {
+        resultEl.innerHTML = `<span class="photo-score-text">Couldn't read that photo - try a different file.</span>${photoRemoveBtnHtml}`;
+        pendingPhotoScore = null;
+      });
+    });
+  }
+  // Delegated (the remove button is added/removed with resultEl's innerHTML
+  // above, so it doesn't exist yet at wiring time).
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("#photo-remove-btn")) clearPendingPhoto();
+  });
 
   document.getElementById("log-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const species = document.getElementById("log-species").value.trim();
-    if (!species) return;
     const actualLightKey = document.getElementById("log-actual-light").value;
     const actualBirdKey = document.getElementById("log-actual-bird").value;
+    // A quick "just rate the sunset/bird activity" entry, with none of the
+    // species/gear/notes/photo detail filled in, is a completely valid log
+    // entry on its own - it still feeds calibration - so the only thing that
+    // blocks a submit is having literally nothing to log at all. That used
+    // to fail completely silently (tap Add Entry, nothing visibly happens),
+    // which reads as a broken button - now it says why.
+    if (!species && !actualLightKey && !actualBirdKey) {
+      setLogStatus("Pick a rating, or add a species/note below, before saving.", "is-error");
+      return;
+    }
     const entries = loadLog();
     const entry = {
       ts: Date.now(),
-      species,
+      species: species || "(rating only)",
       gear: document.getElementById("log-gear").value.trim(),
       notes: document.getElementById("log-notes").value.trim(),
       sunPhase: state.lastPhase || "",
       birdScore: state.birdScore ? state.birdScore.total : ""
     };
+    if (pendingPhotoScore) {
+      entry.photoScore = pendingPhotoScore.score;
+      entry.photoTier = pendingPhotoScore.tier;
+    }
     // Only entries with BOTH a prediction and a rating feed calibration -
     // predictedLight/predictedBird use the model's raw (uncalibrated) output
     // so an existing correction never gets baked into computing the next one.
@@ -2105,7 +3657,19 @@ document.addEventListener("DOMContentLoaded", () => {
     saveLog(entries);
     renderLog(true);
     feedbackSuccess();
+    setLogStatus("Entry saved.", "is-ok");
     e.target.reset();
+    pendingPhotoScore = null;
+    const photoResultEl = document.getElementById("photo-score-result");
+    if (photoResultEl) { photoResultEl.hidden = true; photoResultEl.innerHTML = ""; }
+    if (photoInput) photoInput.value = "";
+    // The form reset above clears both dropdowns back to "Didn't rate it" -
+    // treat the next entry as untouched again and immediately re-fill it
+    // with the current prediction, rather than leaving it blank until the
+    // next tab switch or 15s tick.
+    state.logTouched.light = false;
+    state.logTouched.bird = false;
+    autoFillLogRatings();
   });
 
   document.getElementById("export-csv").addEventListener("click", exportCsv);
@@ -2179,6 +3743,31 @@ const ASK_KB = [
     answer: "The Direction tab is a compass that points where the sun sits in the sky, right now or at any time you pick. Altitude is how high above the horizon it is (negative means it's below the horizon); azimuth is the compass bearing, 0-360 degrees clockwise from north, which the needle also shows visually. Use the date arrows and slider to preview any time without waiting for it, or tap the clock icon to jump back to the live moment. It's a plain compass dial, not a street map, so it works offline and needs no location permission beyond whatever you've already set for the app."
   },
   {
+    topic: "Sunrise/sunset/blue hour marks on the compass",
+    keywords: ["where will the sun rise", "where will the sun set", "compass sunrise mark", "compass sunset mark", "blue hour arc", "sun position on compass", "compass markers"],
+    answer: "The Direction tab's compass marks exactly where the sun will be: a sun-icon dot for sunrise and one for sunset, plus a short teal arc on each side showing how much the bearing shifts during blue hour (nautical dawn to dawn in the morning, dusk to nautical dusk in the evening). These are calculated for whichever day is currently shown, so using the day-forward/back arrows updates them, not just today's marks. They sit on the dial itself, so if you enable the live compass, they turn along with it exactly like the N/E/S/W ticks."
+  },
+  {
+    topic: "Live compass (device orientation)",
+    keywords: ["live compass", "enable live compass", "phone compass", "turn to face", "compass sensor", "facing the sun", "rotate compass", "point phone"],
+    answer: "Tapping 'Enable live compass' on the Direction tab turns the whole dial to match which way your phone is actually pointing, using its compass sensor, so you can physically turn until the needle lines up at the top. This only works on a phone with a compass sensor, over a secure connection, and iPhones require you to tap Allow when it asks - that's an Apple privacy rule, not something the app can skip. It won't do anything on a desktop or laptop browser, since those have no compass hardware at all."
+  },
+  {
+    topic: "Photo score breakdown",
+    keywords: ["how is my photo score calculated", "photo score breakdown", "how this number was calculated", "photo math", "photo points", "score calculated", "calculated score"],
+    answer: "Tap 'How this number was calculated' under any photo score to expand the exact math: what percent of the frame was treated as sky, the average color saturation in that region and how many points that earned (out of 55), and what percent of that region was a warm sunset/sunrise hue and how many points that earned (out of 45). Those two numbers always add up to the final score out of 100."
+  },
+  {
+    topic: "Photo not detected as a sky/sunset photo",
+    keywords: ["not a sky photo", "not detected as sunset", "didn't detect my sunset", "photo was rejected", "photo rejected", "rejected", "doesn't look like a sky", "photo not scored", "didn't score my photo", "wasn't detected", "not get detected", "not detected", "didn't get detected", "photo not detected"],
+    answer: "The app looks for a smooth, low-detail region at the top of the frame (the sky) above a busier foreground (trees, a treeline, buildings, a person), and only scores the sky region. It gets rejected as 'not a sky photo' if that smooth region is too small, too busy (heavy clouds/texture read as detail), or if a face-like patch of skin-tone color is detected. If a genuine sunset shot gets rejected, it's almost always because the sky was a small sliver of the frame or had unusually heavy texture - cropping in tighter on the sky before uploading usually fixes it."
+  },
+  {
+    topic: "Sunset photo score",
+    keywords: ["photo score", "sunset photo", "analyze photo", "photo analysis", "detect photo", "how good was", "add a photo"],
+    answer: "In the Shoot Log, adding a photo reads its actual color, average saturation plus how much warm orange/pink tone is in it, and turns that into a 0-100 score that pre-fills the 'Light quality - actually' rating for you. Use the raw, unedited photo straight off your camera or phone - a filtered or edited one scores how it looks after editing, not how the sky really looked. It's a color heuristic run entirely on your device (nothing uploaded anywhere), not real scene recognition, so it can also be thrown off by a photo with a lot of dark foreground - always glance at the pre-filled rating and correct it if it doesn't match what you actually saw before saving, since that rating is what teaches the app's calibration."
+  },
+  {
     topic: "Why bird score is low",
     keywords: ["score low", "score is low", "quiet period", "why is my score", "activity low", "no activity"],
     answer: "A low bird score usually means one or more of: it's the middle of the day or the middle of the night (activity naturally dips then), the weather has strong wind or active rain, or it's outside spring/fall migration season. Check the factor tiles under the meter, they show exactly which inputs are pulling the score down right now."
@@ -2191,17 +3780,32 @@ const ASK_KB = [
   {
     topic: "Sunrise/sunset quality score",
     keywords: ["sunrise quality", "sunset quality", "quality score", "sunrise percent", "sunset percent", "colorful sky", "sky color"],
-    answer: "The sunrise/sunset percentage predicts how colorful the sky is likely to look, based on high/mid cloud cover (which catches color), low cloud cover (which blocks it), and humidity (which mutes it). A moderate amount of high/mid cloud, roughly a third to half the sky, scores highest - fully clear or fully overcast both score lower."
+    answer: "The sunrise/sunset percentage predicts how colorful the sky is likely to look, based on high/mid cloud cover (which catches color), low cloud cover (which blocks it), humidity (which mutes it), and aerosol/haze (which can go either way - see 'aerosol' below). A moderate amount of high/mid cloud, roughly a third to half the sky, scores highest - fully clear or fully overcast both score lower."
+  },
+  {
+    topic: "Why is a sunrise/sunset score what it is (Outlook)",
+    keywords: ["why is it 30%", "why is the score", "outlook breakdown", "tap to see why", "click outlook", "explain the score", "why is sunrise bad", "why is sunset good"],
+    answer: "Tap any sunrise or sunset score in the 7-Day Outlook to expand a breakdown of exactly what produced that number for that hour: the high/mid/low cloud cover readings versus their ideal bands, humidity, aerosol/haze, and terrain, each with a one-line note on whether it helped or hurt the score. It's the same math as the Dashboard's live score, just made visible for every day instead of only today."
+  },
+  {
+    topic: "Golden hour intensity",
+    keywords: ["golden hour intensity", "golden hour score", "color temperature", "cct", "kelvin", "white balance", "warm light score"],
+    answer: "Golden Hour Intensity is a separate 0-100 score from the sunrise/sunset quality percentage: quality is about whether the sky shows color, this is about whether the direct warm sunlight itself is strong and unobstructed right now. It's only active while the sun is within the -0.833 to 6 degree golden-hour band, and factors in how centered the sun is in that window, total cloud cover blocking direct light, and aerosol haze. It also shows an estimated color temperature in Kelvin for white balance - a simplified physics-based estimate from solar elevation, not a measured reading."
+  },
+  {
+    topic: "Legendary conditions badge",
+    keywords: ["legendary", "legendary conditions", "epic", "glow", "badge", "flame", "crazy sunset", "amazing sunset", "why did it glow", "why is it glowing"],
+    answer: "A sunrise or sunset quality score of 95+ gets the 'Legendary conditions' treatment: a pulsing glow on its ring, a badge, and a one-time burst/sound the first time it's detected. It's set well above the 'Great' label (75+) on purpose - a 200,000-sample simulation of realistic conditions against this formula puts Great at roughly the top 9-10% of days, with 95+ reserved for a small handful of truly exceptional evenings - meant to flag something genuinely rare, not just another good evening. It also shows as a small flame mark on the 7-day Outlook, without the animation."
+  },
+  {
+    topic: "Aerosol / haze in the quality score",
+    keywords: ["aerosol", "aod", "smoke", "dust", "wildfire", "haze in the score", "why does smoke", "optical depth"],
+    answer: "Aerosol optical depth (AOD) is a real measurement of how much smoke, dust, or general haze is in the whole air column, pulled from Open-Meteo's air quality model, and it now feeds the sunrise/sunset quality score directly. It's genuinely two-sided: a light-to-moderate amount tends to deepen sunset reds and oranges (which is why sunsets often look more dramatic downwind of wildfire smoke or a dust storm), while a heavy load flattens color into a murky haze instead. You can see the current reading on the Weather & Exposure card under 'Atmospheric haze (AOD)'."
   },
   {
     topic: "Terrain / horizon",
     keywords: ["terrain", "horizon", "ridge", "mountain", "hill", "behind terrain", "clears terrain"],
     answer: "If there's a real hill, ridge, or bluff near your sunrise/sunset direction, the app checks real elevation data and shows you the actual time the sun disappears behind it or clears it. This only affects the light-duration times, never the sunrise/sunset color score, since sky color keeps developing whether or not something blocks your direct view of the sun."
-  },
-  {
-    topic: "Weather & exposure card",
-    keywords: ["exposure", "iso", "cloud cover", "weather card", "shutter speed"],
-    answer: "The Weather & Exposure card suggests an ISO range assuming you're using a fast shutter speed for sharp bird-in-flight shots (about 1/1600-1/2500s), based on sun angle and cloud cover. It's a starting point, not a light-meter reading of your actual scene."
   },
   {
     topic: "UV index",
@@ -2236,7 +3840,7 @@ const ASK_KB = [
   {
     topic: "Calibration",
     keywords: ["calibration", "calibrate", "rate", "actual light", "actual bird", "correction", "learn"],
-    answer: "Calibration is how the app learns from your own results. Rate what light or bird activity was actually like on a Shoot Log entry, and the app compares it to what it predicted at that moment. After 3+ rated shoots, the average difference becomes a correction applied to future predictions (capped at 25 points for light, 300 for bird activity). Delete a bad entry and it recalculates instantly."
+    answer: "Calibration is how the app learns from your own results. Rate what light or bird activity was actually like on a Shoot Log entry, and the app compares it to what it predicted at that moment. After 3+ rated shoots, the average difference becomes a correction applied to future predictions (capped at 20 points for light, 200 for bird activity - one rating tier's worth out of the 5 options each dropdown now has). Delete a bad entry and it recalculates instantly."
   },
   {
     topic: "Shoot Log",
@@ -2296,12 +3900,17 @@ const ASK_KB = [
   {
     topic: "Weather/season modifier numbers",
     keywords: ["weather modifier", "season modifier", "x1", "migration modifier", "what does x mean"],
-    answer: "The weather modifier (roughly x0.55 to x1.15) and season modifier (roughly x0.70 to x1.20) are multipliers applied to the time-of-day base score, not separate scores of their own. A weather modifier of x1.15 means current conditions are boosting activity by about 15% above the daytime baseline; x0.70 means conditions are suppressing it."
+    answer: "The weather modifier (x0.60 to x1.05) and season modifier (x0.75 to x1.05) are multipliers applied to the time-of-day base score, not separate scores of their own. A weather modifier of x1.05 means current conditions are boosting activity a little above the daytime baseline; x0.60 means conditions are suppressing it substantially. Both are capped close to 1.0x on purpose, so great weather and peak migration together can't manufacture a big score out of a time of day with no real activity potential to begin with."
+  },
+  {
+    topic: "High bird score late at night",
+    keywords: ["bird activity at night", "700 at night", "high score at night", "birds active at night", "activity late at night", "why is bird score high at night", "10 pm bird score", "11 pm bird score", "nocturnal migration"],
+    answer: "A high number a few hours after sunset during spring (Apr-May) or fall (Sep-Oct) is real, not a bug - it's modeling nocturnal migratory flight, which genuinely peaks 2-5 hours after dark during those windows (this is the same well-documented pattern Cornell's BirdCast nocturnal migration forecasts are built on). It's overhead migratory movement, not birds you'd see or hear on the ground, which is why the verdict text calls that out explicitly when it's the main driver, and the factor grid shows a 'Nocturnal migration flight' line whenever it's contributing meaningfully to the total."
   },
   {
     topic: "What species does this cover",
     keywords: ["species", "what birds", "owls", "nocturnal", "songbirds", "raptors"],
-    answer: "The model is tuned for birds active during the day, songbirds, woodpeckers, raptors, and waterfowl. It is not built for owls or species that migrate at night, which is why the score never drops all the way to zero after dark, it accounts for some nocturnal activity existing without claiming to predict it accurately."
+    answer: "The model is tuned for birds active during the day, songbirds, woodpeckers, raptors, and waterfowl. It is not built for owls or other non-migratory nocturnal behavior, which is why the score never drops all the way to zero after dark outside migration season. The one exception: during spring and fall migration windows, it adds a real night bump timed to when radar-tracked nocturnal migration traffic typically peaks, a few hours after full dark."
   },
   {
     topic: "Minimum shoots for calibration",
@@ -2327,6 +3936,16 @@ const ASK_KB = [
     topic: "Terrain fan sampling detail",
     keywords: ["fan sampling", "bearing fan", "elevation api", "how terrain works", "azimuth"],
     answer: "The terrain check samples real elevation data across a small fan of compass bearings around your exact sunrise/sunset direction, at five distances out to 55km, and finds the tallest obstruction across that whole fan. A single ray checked at only a few fixed points can miss a real peak sitting slightly off to the side, so the fan is a meaningfully harder target to step around than one line, though it still isn't a continuous scan of the whole skyline."
+  },
+  {
+    topic: "Stuck on the wrong location / default location banner",
+    keywords: ["wrong location", "stuck on kansas", "default location", "not my location", "location banner", "gps not working", "gps didn't set", "gps sync", "weather is off", "temperature is wrong", "wrong city"],
+    answer: "If every reading looks off, the app is probably still sitting on its generic fallback spot (center of the US) instead of your real location - a banner at the top of the Dashboard says so when that's the case. This happens if GPS was denied, timed out, or you never set a location: the app now automatically retries GPS on every load while it's stuck on the fallback, and shows a clear error message instead of failing silently. Tap 'Use GPS' on that banner or the header, or type your town/city into the Location box and hit Set, and every reading (temperature, humidity, wind, barometer, sunrise/sunset) updates from that point on."
+  },
+  {
+    topic: "Why weather numbers differ from another weather app",
+    keywords: ["differs from another app", "different from apple weather", "different from weather app", "why is the temperature different", "disagrees with", "another site says", "which weather app is right", "most accurate weather"],
+    answer: "Weather here comes from Open-Meteo, which blends 15+ national weather agency models (NOAA, ECMWF, DWD, and others) and picks the highest-resolution one for your spot - it's a legitimate, free data source, the same class of underlying model most weather apps are built on. Two different weather providers forecasting the same hour will still disagree by a couple of degrees sometimes, especially in places with fewer nearby weather stations - that's normal model variance, not a bug in either one, and no single provider is 'the most accurate' across every location and day."
   }
 ];
 const ASK_STOPWORDS = new Set(["a","an","the","is","are","does","do","did","why","what","whats","how","my","me","to","of","on","for","in","it","this","that","i","you","your","when","can","will","should","about","and","or"]);
@@ -2422,5 +4041,7 @@ document.addEventListener("DOMContentLoaded", () => {
     e.preventDefault();
     askSubmitQuestion(document.getElementById("ask-input").value);
   });
-  wireTactileFeedback("#ask-fab, #ask-close, #ask-form button, .ask-suggestion");
+  // (No separate wireTactileFeedback call needed here - the single
+  // delegated wireTactileFeedback("button") call above already covers the
+  // Ask panel's buttons, including .ask-suggestion, which is added later.)
 });
