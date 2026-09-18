@@ -32,6 +32,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Node.js
+        # Capacitor 8's CLI hard-requires Node >= 22 and exits immediately on
+        # anything older, so this is not a "newer is nicer" choice.
         uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -93,6 +95,50 @@ jobs:
             CURRENT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" App/Info.plist)
             echo "No version given, keeping $CURRENT"
           fi
+
+      # Answers Apple's export compliance question in the project itself, so
+      # App Store Connect stops asking it by hand on every single upload.
+      #
+      # "false" here is a declaration that the app uses no non-exempt
+      # encryption, and it is accurate for Raylight: the only encryption
+      # involved is standard HTTPS to Open-Meteo, provided by iOS itself,
+      # which is explicitly exempt. There is no custom cryptography anywhere
+      # in the app. If that ever stops being true (bundling a crypto library,
+      # implementing an algorithm), this line has to be revisited, because it
+      # is a legal declaration to a US export authority, not a build setting.
+      - name: Declare export compliance
+        working-directory: ios-app/ios/App
+        run: |
+          /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" App/Info.plist \
+            || /usr/libexec/PlistBuddy -c "Set :ITSAppUsesNonExemptEncryption false" App/Info.plist
+          echo "ITSAppUsesNonExemptEncryption set to false"
+
+      # iOS refuses to even ASK the user for these permissions unless the app
+      # declares why it wants them, and the failure is silent: no prompt, no
+      # error, the request simply never returns. That is what made "Use GPS"
+      # hang forever on "Getting GPS position..." and the photo picker do
+      # nothing in the native build, while both worked fine in a browser.
+      #
+      # Capacitor's generated Info.plist does not include these, and this
+      # workflow regenerates ios/ on every run, so they are set here rather
+      # than by hand in Xcode - otherwise they would vanish on the next build.
+      - name: Declare iOS permission usage strings
+        working-directory: ios-app/ios/App
+        run: |
+          set_string() {
+            /usr/libexec/PlistBuddy -c "Add :$1 string '$2'" App/Info.plist \
+              || /usr/libexec/PlistBuddy -c "Set :$1 '$2'" App/Info.plist
+          }
+          set_string NSLocationWhenInUseUsageDescription \
+            "Raylight uses your location to calculate sun position, sunrise and sunset times, and local weather for bird activity."
+          set_string NSCameraUsageDescription \
+            "Raylight can score a sunset photo you take, to rate the light in your shoot log."
+          set_string NSPhotoLibraryUsageDescription \
+            "Raylight reads a sunset photo you choose to score its color. The photo stays on your device."
+          echo "--- Info.plist permission strings ---"
+          /usr/libexec/PlistBuddy -c "Print :NSLocationWhenInUseUsageDescription" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :NSPhotoLibraryUsageDescription" App/Info.plist
 
       - name: Archive
         working-directory: ios-app/ios/App
