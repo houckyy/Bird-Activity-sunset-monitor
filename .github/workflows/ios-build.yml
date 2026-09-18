@@ -1,0 +1,154 @@
+name: iOS Build & TestFlight
+
+# Manual trigger (a button in the GitHub Actions tab) plus an optional tag
+# trigger, so a real release is always something you decide to do on purpose,
+# not something that fires on every commit and burns App Store Connect build
+# slots.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to show users (e.g. 1.1). Leave blank to keep the current one."
+        required: false
+        default: ""
+  push:
+    tags:
+      - "ios-v*"
+
+defaults:
+  run:
+    working-directory: ios-app
+
+jobs:
+  build-and-release:
+    # Pinned deliberately rather than "macos-latest": runner images move to new
+    # major Xcode versions on their own schedule, which is exactly the kind of
+    # surprise that breaks a signing pipeline right when you need it. Bump this
+    # yourself after checking https://github.com/actions/runner-images.
+    runs-on: macos-26
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install npm dependencies
+        run: npm install
+
+      # Capacitor 8 generates a Swift Package Manager project, not a CocoaPods
+      # one, so there is no `pod install` step anywhere in this pipeline and no
+      # Ruby dependency at all. Xcode resolves the Swift packages itself during
+      # the archive step below.
+      - name: Generate native iOS project if it isn't committed
+        run: |
+          if [ ! -d "ios" ]; then
+            echo "No ios/ folder in the repo - generating it with Capacitor."
+            npx cap add ios
+          else
+            echo "ios/ already present, using the committed project."
+          fi
+
+      # Copies index.html/app.js/style.css/suncalc-lite.js/manifest.json and
+      # assets/ from the repo root into www/, then syncs www/ into the native
+      # project. This is what makes "edit the web app, push, click Run workflow"
+      # produce an updated iOS build.
+      - name: Copy the web app in and sync the native project
+        run: npm run cap:sync
+
+      # The App Store Connect API key, written where both xcodebuild and Apple's
+      # upload tooling look for it. This single key replaces fastlane match, a
+      # distribution certificate, a provisioning profile, an Apple ID password
+      # and a 2FA prompt: with -allowProvisioningUpdates, Xcode uses it to fetch
+      # or create Apple's cloud-managed distribution signing on demand.
+      - name: Write the App Store Connect API key
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.ASC_PRIVATE_KEY }}" | base64 --decode > ~/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8
+          chmod 600 ~/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8
+
+      # Two different numbers, on purpose:
+      #
+      # CFBundleVersion (the build number) MUST be unique for every upload or
+      # Apple rejects it outright, so it is stamped automatically with GitHub's
+      # own incrementing run number and you never think about it.
+      #
+      # CFBundleShortVersionString (the version users actually see, e.g. "1.1")
+      # only changes when you say so, by typing it into the "version" box when
+      # you click Run workflow. Left blank, the current value is kept, which is
+      # the right behaviour for a rebuild that isn't a new release.
+      - name: Stamp version and build number
+        working-directory: ios-app/ios/App
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" App/Info.plist
+          echo "Build number set to ${{ github.run_number }}"
+          VERSION="${{ github.event.inputs.version }}"
+          if [ -n "$VERSION" ]; then
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" App/Info.plist
+            echo "Version set to $VERSION"
+          else
+            CURRENT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" App/Info.plist)
+            echo "No version given, keeping $CURRENT"
+          fi
+
+      - name: Archive
+        working-directory: ios-app/ios/App
+        run: |
+          xcodebuild \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" \
+            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            archive
+
+      # destination=upload makes xcodebuild send the build straight to App Store
+      # Connect as part of the export, using the same API key. That avoids
+      # altool, which Apple has been steadily deprecating.
+      - name: Export and upload to TestFlight
+        working-directory: ios-app/ios/App
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>destination</key>
+            <string>upload</string>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
+
+      # Build logs are the only way to diagnose a failed signing/export run, and
+      # they are not visible once the runner is torn down.
+      - name: Save logs if something failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            ~/Library/Logs/gym
+            ~/Library/Developer/Xcode/DerivedData/**/Logs
+          if-no-files-found: ignore
