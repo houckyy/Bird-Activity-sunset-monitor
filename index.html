@@ -227,20 +227,12 @@
           <g id="dir-sun-events"></g>
           <line id="dir-needle" x1="150" y1="150" x2="150" y2="38" class="dir-needle"></line>
           <path id="dir-needle-tip" d="M150 20 L138 42 L162 42 Z" class="dir-needle-tip"></path>
-          <line id="dir-manual-needle" x1="150" y1="150" x2="150" y2="88" class="dir-manual-needle" hidden></line>
-          <path id="dir-manual-needle-tip" d="M150 78 L140 92 L160 92 Z" class="dir-manual-needle-tip" hidden></path>
         </g>
         <path d="M150 6 L142 24 L158 24 Z" class="dir-facing-mark"></path>
         <circle cx="150" cy="150" r="5" class="dir-compass-hub"></circle>
       </svg>
       <div id="dir-facing-badge" class="dir-facing-badge" hidden>Facing the sun</div>
       <div id="dir-status-label" class="dir-status-label">--</div>
-      <p class="dir-manual-hint">Tap or drag anywhere on the dial to mark your own direction &mdash; your framing, a landmark, whatever you want to compare against the sun.</p>
-      <div id="dir-manual-readout" class="dir-manual-readout" hidden>
-        <span class="dir-legend-swatch dir-legend-manual"></span>
-        Your mark: <span id="dir-manual-bearing-text">--</span>
-        <button type="button" id="dir-manual-clear" class="dir-manual-clear">Clear</button>
-      </div>
     </div>
     <div class="dir-events-legend">
       <span class="dir-legend-item"><span class="dir-legend-swatch dir-legend-sunrise"></span>Sunrise</span>
@@ -313,7 +305,13 @@
         <div class="photo-score-block">
           <label for="log-photo-input" class="photo-score-label">Add a sunset/sunrise photo (optional)</label>
           <p class="photo-score-hint">Reads the photo's actual color to pre-fill the rating above &mdash; use the raw, unedited shot (filters/edits change what it reads). A color heuristic, not real recognition, so double-check before saving.</p>
-          <input type="file" accept="image/*" capture="environment" id="log-photo-input">
+          <!-- No `capture` attribute on purpose. Setting capture="environment"
+               forces the camera and removes the photo library option entirely,
+               which is backwards for this feature: you are almost always
+               scoring a sunset you already shot, not one you are taking at
+               that moment. It also made the control unusable in the native
+               iOS build. -->
+          <input type="file" accept="image/*" id="log-photo-input">
           <div id="photo-score-result" class="photo-score-result" hidden></div>
         </div>
 
@@ -332,6 +330,7 @@
       <button id="export-csv">Export CSV</button>
       <button id="clear-log">Clear Log</button>
     </div>
+    <p class="table-scroll-hint">Swipe the table sideways to see the rest of each entry, including the delete button.</p>
     <div class="table-scroll">
       <table class="log-table" id="log-table">
         <thead>

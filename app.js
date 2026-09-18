@@ -1631,6 +1631,20 @@ function hoursBetween(a, b) {
   return (a.getTime() - b.getTime()) / 3600000;
 }
 
+// SunCalcLite's getTimes() (the same underlying algorithm as the widely-used
+// SunCalc.js) can only find a horizon crossing that actually happens - deep
+// in polar day or polar night, the sun doesn't rise or set at all that day,
+// and the underlying Math.acos() the math needs goes out of its domain,
+// silently producing NaN and an Invalid Date rather than throwing. That's a
+// known characteristic of this class of algorithm, not something worth
+// swapping out - but any code downstream that assumes sunrise/sunset are
+// always real dates needs to check for this first, or a NaN quietly poisons
+// every score built from it (a park ranger in Illinois never sees this; a
+// user checking the app from Alaska in December or June would).
+function isValidDate(d) {
+  return d instanceof Date && !isNaN(d.getTime());
+}
+
 // Real nocturnal migratory flight - not modeled by the diurnal/crepuscular
 // curve below at all - is often the single largest bird-activity signal at
 // night during the spring/fall migration windows. Radar-tracked nocturnal
@@ -1645,6 +1659,7 @@ function hoursBetween(a, b) {
 function nocturnalMigrationBonus(elevationDeg, now, times) {
   if (elevationDeg > -12) return 0; // still twilight - already covered by the curve below
   if (expectedTailwindBearing(now) === null) return 0; // outside spring/fall migration windows
+  if (!isValidDate(times.sunset)) return 0; // polar day/night - no sunset happened today to measure from
   const hrSinceSunset = hoursBetween(now, times.sunset);
   if (!(hrSinceSunset > 0)) return 0; // guard against bad/missing sunset data
   const sigma = 2.5;
@@ -1687,9 +1702,13 @@ function nocturnalMigrationBonus(elevationDeg, now, times) {
 function dielFactor(elevationDeg, now, times) {
   const sigma = 1.5;
   const gauss = (h) => Math.exp(-(h * h) / (2 * sigma * sigma));
-  const hrSunrise = hoursBetween(now, times.sunrise);
-  const hrSunset = hoursBetween(now, times.sunset);
-  const twilightBonus = Math.max(gauss(hrSunrise), gauss(hrSunset)) * 55;
+  // Deep in polar day/night, sunrise/sunset never happen that day and
+  // times.sunrise/times.sunset come back as Invalid Date (see isValidDate's
+  // comment) - there's no twilight transition to give a bonus for, so this
+  // term is simply 0 rather than poisoning the whole score with NaN.
+  const hrSunrise = isValidDate(times.sunrise) ? hoursBetween(now, times.sunrise) : null;
+  const hrSunset = isValidDate(times.sunset) ? hoursBetween(now, times.sunset) : null;
+  const twilightBonus = Math.max(hrSunrise !== null ? gauss(hrSunrise) : 0, hrSunset !== null ? gauss(hrSunset) : 0) * 55;
 
   let base;
   if (elevationDeg > 0) {
@@ -2630,95 +2649,134 @@ function findSkyBottom(lum, W, H) {
   return H;
 }
 
-function analyzeSunsetPhoto(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const W = 140, H = 94; // downscaled for speed, but not so far that real detail (a face, text, foliage) gets smoothed away into looking sky-flat
-        const canvas = document.createElement("canvas");
-        canvas.width = W; canvas.height = H;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, W, H);
-        const data = ctx.getImageData(0, 0, W, H).data;
+// Decodes the picked photo directly at the small size the analysis needs,
+// instead of decoding it at full resolution and shrinking afterwards.
+//
+// This is the difference between a score and a crash on a real phone. A
+// photo straight off an iPhone is 12-48 megapixels; decoding one at full
+// size allocates hundreds of megabytes of bitmap, and inside a WKWebView
+// (which is what the native app runs the page in) iOS answers that by
+// killing the web content process outright. To the user the whole app just
+// dies, and there is no JS error to catch because the process handling the
+// JS is the one being killed. createImageBitmap's resize options let the
+// image decoder scale down *while* decoding, so peak memory stays at a few
+// hundred kilobytes regardless of how large the original photo is.
+//
+// The <img> path below is kept only as a fallback for browsers without
+// resize support, where the old full-resolution decode is the only option.
+async function decodePhotoAtSize(file, W, H) {
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bitmap = await createImageBitmap(file, {
+        resizeWidth: W,
+        resizeHeight: H,
+        resizeQuality: "high"
+      });
+      return { source: bitmap, cleanup: () => { if (bitmap.close) bitmap.close(); } };
+    } catch (e) {
+      // Older WebKit accepts createImageBitmap but not the resize options,
+      // and some builds reject HEIC through it specifically - fall through
+      // rather than failing the whole analysis.
+    }
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("Could not read that image file"));
+      el.src = url;
+    });
+    return { source: img, cleanup: () => URL.revokeObjectURL(url) };
+  } catch (err) {
+    URL.revokeObjectURL(url);
+    throw err;
+  }
+}
 
-        // Full-frame luminance first (needed to find the horizon), and hue/
-        // sat cached per pixel so the second pass over just the sky rows
-        // doesn't recompute rgbToHsl.
-        const lum = new Float32Array(W * H);
-        const hueArr = new Float32Array(W * H);
-        const satArr = new Float32Array(W * H);
-        for (let y = 0; y < H; y++) {
-          for (let x = 0; x < W; x++) {
-            const i = (y * W + x) * 4;
-            const r = data[i], g = data[i + 1], b = data[i + 2];
-            const { h, s } = rgbToHsl(r, g, b);
-            hueArr[y * W + x] = h;
-            satArr[y * W + x] = s;
-            lum[y * W + x] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-          }
-        }
+async function analyzeSunsetPhoto(file) {
+  const W = 140, H = 94; // downscaled for speed, but not so far that real detail (a face, text, foliage) gets smoothed away into looking sky-flat
+  const { source, cleanup } = await decodePhotoAtSize(file, W, H);
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(source, 0, 0, W, H);
+    const data = ctx.getImageData(0, 0, W, H).data;
 
-        // Sky vs. non-sky is judged only above the detected horizon, not the
-        // whole photo. A huge share of real sunrise/sunset shots - basically
-        // all wildlife/nature framing - put a detailed silhouette (branches,
-        // grass, a treeline, a bird) across the BOTTOM of the frame under a
-        // smooth sky above it, and that foreground can reach well over half
-        // the frame height. Scanning the whole image, or even a fixed top
-        // fraction, for "is there any real detail anywhere" rejected those
-        // as if they were an ordinary detailed photo, when the actual sky
-        // portion was a completely genuine, smooth gradient.
-        const skyH = findSkyBottom(lum, W, H);
-
-        let satSum = 0, warmCount = 0, count = 0;
-        for (let y = 0; y < skyH; y++) {
-          for (let x = 0; x < W; x++) {
-            const idx = y * W + x;
-            satSum += satArr[idx];
-            // Widened to include violet/magenta (roughly 250-300), not just
-            // orange-red-pink - a purple "alpenglow" dawn/dusk sky is a very
-            // real, very photogenic sunrise/sunset color, and scoring it as
-            // if it were an ordinary blue daytime sky just because it isn't
-            // literally orange badly understated genuinely vivid photos.
-            const isWarmHue = hueArr[idx] <= 40 || hueArr[idx] >= 250;
-            if (isWarmHue && satArr[idx] >= 0.15) warmCount++;
-            count++;
-          }
-        }
-        // A real sky photo has a meaningfully sized clear region, not just a
-        // sliver above someone's hairline or a shelf's edge - if detail
-        // starts almost immediately, this was never a sky shot to begin with.
-        const hasEnoughSky = skyH >= H * 0.22;
-        const avgSaturation = count ? satSum / count : 0;
-        const warmFraction = count ? warmCount / count : 0;
-        const avgEdge = count ? averageEdgeEnergy(lum, W, skyH) : 999;
-        const busyFraction = count ? busyBlockFraction(lum, W, skyH, 10, Math.max(2, Math.round(skyH / 12)), BUSY_BLOCK_THRESHOLD) : 1;
-        const hasSkinBlob = count ? skinBlobCheck(data, W, skyH) : false;
-        const looksLikeSky = hasEnoughSky && avgEdge < SKY_EDGE_THRESHOLD && busyFraction <= SKY_MAX_BUSY_FRACTION && !hasSkinBlob;
-
-        const score = Math.max(0, Math.min(100, Math.round(avgSaturation * 55 + warmFraction * 45)));
-        const tier = photoScoreToTier(score);
-        URL.revokeObjectURL(url);
-        resolve({
-          score, tier, label: PHOTO_TIER_LABELS[tier],
-          avgSaturationPct: Math.round(avgSaturation * 100),
-          warmPct: Math.round(warmFraction * 100),
-          looksLikeSky,
-          avgEdge: Math.round(avgEdge * 10) / 10,
-          busyFraction: Math.round(busyFraction * 1000) / 1000,
-          skyFraction: Math.round((skyH / H) * 100) / 100,
-          hasSkinBlob,
-          previewUrl: canvas.toDataURL("image/jpeg", 0.7)
-        });
-      } catch (err) {
-        URL.revokeObjectURL(url);
-        reject(err);
+    // Full-frame luminance first (needed to find the horizon), and hue/
+    // sat cached per pixel so the second pass over just the sky rows
+    // doesn't recompute rgbToHsl.
+    const lum = new Float32Array(W * H);
+    const hueArr = new Float32Array(W * H);
+    const satArr = new Float32Array(W * H);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const { h, s } = rgbToHsl(r, g, b);
+        hueArr[y * W + x] = h;
+        satArr[y * W + x] = s;
+        lum[y * W + x] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
       }
+    }
+
+    // Sky vs. non-sky is judged only above the detected horizon, not the
+    // whole photo. A huge share of real sunrise/sunset shots - basically
+    // all wildlife/nature framing - put a detailed silhouette (branches,
+    // grass, a treeline, a bird) across the BOTTOM of the frame under a
+    // smooth sky above it, and that foreground can reach well over half
+    // the frame height. Scanning the whole image, or even a fixed top
+    // fraction, for "is there any real detail anywhere" rejected those
+    // as if they were an ordinary detailed photo, when the actual sky
+    // portion was a completely genuine, smooth gradient.
+    const skyH = findSkyBottom(lum, W, H);
+
+    let satSum = 0, warmCount = 0, count = 0;
+    for (let y = 0; y < skyH; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y * W + x;
+        satSum += satArr[idx];
+        // Widened to include violet/magenta (roughly 250-300), not just
+        // orange-red-pink - a purple "alpenglow" dawn/dusk sky is a very
+        // real, very photogenic sunrise/sunset color, and scoring it as
+        // if it were an ordinary blue daytime sky just because it isn't
+        // literally orange badly understated genuinely vivid photos.
+        const isWarmHue = hueArr[idx] <= 40 || hueArr[idx] >= 250;
+        if (isWarmHue && satArr[idx] >= 0.15) warmCount++;
+        count++;
+      }
+    }
+    // A real sky photo has a meaningfully sized clear region, not just a
+    // sliver above someone's hairline or a shelf's edge - if detail
+    // starts almost immediately, this was never a sky shot to begin with.
+    const hasEnoughSky = skyH >= H * 0.22;
+    const avgSaturation = count ? satSum / count : 0;
+    const warmFraction = count ? warmCount / count : 0;
+    const avgEdge = count ? averageEdgeEnergy(lum, W, skyH) : 999;
+    const busyFraction = count ? busyBlockFraction(lum, W, skyH, 10, Math.max(2, Math.round(skyH / 12)), BUSY_BLOCK_THRESHOLD) : 1;
+    const hasSkinBlob = count ? skinBlobCheck(data, W, skyH) : false;
+    const looksLikeSky = hasEnoughSky && avgEdge < SKY_EDGE_THRESHOLD && busyFraction <= SKY_MAX_BUSY_FRACTION && !hasSkinBlob;
+
+    const score = Math.max(0, Math.min(100, Math.round(avgSaturation * 55 + warmFraction * 45)));
+    const tier = photoScoreToTier(score);
+    return {
+      score, tier, label: PHOTO_TIER_LABELS[tier],
+      avgSaturationPct: Math.round(avgSaturation * 100),
+      warmPct: Math.round(warmFraction * 100),
+      looksLikeSky,
+      avgEdge: Math.round(avgEdge * 10) / 10,
+      busyFraction: Math.round(busyFraction * 1000) / 1000,
+      skyFraction: Math.round((skyH / H) * 100) / 100,
+      hasSkinBlob,
+      previewUrl: canvas.toDataURL("image/jpeg", 0.7)
     };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not read that image file")); };
-    img.src = url;
-  });
+  } finally {
+    // Always released, including when the analysis throws, so a rejected
+    // photo can't leak a decoded bitmap on a device that is already tight
+    // on memory.
+    cleanup();
+  }
 }
 
 // ---------- Main refresh ----------
@@ -3046,7 +3104,13 @@ async function geocodePlaceNameMulti(query, count) {
     if (!res.ok) return [];
     const data = await res.json();
     const results = (data && data.results) || [];
-    return results.map(hit => {
+    // Open-Meteo returns matches in its own relevance order, which puts a
+    // 300-person hamlet named "Fort" above every large city whose name
+    // merely starts with it. Sorting by population first is a much better
+    // proxy for "the place someone typing three letters actually meant",
+    // and it costs nothing since population comes back in the same response.
+    const sorted = results.slice().sort((a, b) => (b.population || 0) - (a.population || 0));
+    return sorted.map(hit => {
       const parts = [hit.name, hit.admin1, hit.country].filter(Boolean);
       return { lat: hit.latitude, lon: hit.longitude, placeName: parts.slice(0, 2).join(", "), country: hit.country || "" };
     });
@@ -3363,15 +3427,25 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     setLocStatus("Getting GPS position...", null);
+    // A timeout is not optional here. With no options, getCurrentPosition can
+    // wait forever, and the app sits on "Getting GPS position..." with no
+    // error and no way to tell whether it is still trying. That is exactly
+    // what happens when the OS never even shows the permission prompt, so the
+    // one state the user must never be left in is the one they got.
     navigator.geolocation.getCurrentPosition(pos => {
       applyLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude, label: "GPS" });
       refreshPlaceName();
       setLocStatus("Location set from GPS. Fetching data...", "is-ok");
       if (onDone) onDone(true);
     }, err => {
-      setLocStatus("GPS error: " + err.message + ". Try again, or type your town/city and hit Set.", "is-error");
+      const hint = err.code === 1
+        ? "Location permission is denied - turn it on for this app in your device settings, or type your town/city and hit Set."
+        : err.code === 3
+          ? "GPS timed out (common indoors or with a weak signal). Try again outside, or type your town/city and hit Set."
+          : "Try again, or type your town/city and hit Set.";
+      setLocStatus("GPS error: " + err.message + ". " + hint, "is-error");
       if (onDone) onDone(false);
-    });
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
   }
 
   async function handleSetLocation() {
@@ -3423,8 +3497,15 @@ document.addEventListener("DOMContentLoaded", () => {
     currentSuggestions = hits;
     activeSuggestionIdx = -1;
     if (!hits.length) { hideSuggestions(); return; }
+    // The country is shown on its own line rather than dropped. Searching
+    // "Fort" returns a string of identically-named villages across Europe,
+    // and "Fort, Drenthe" on its own gives you nothing to tell them apart
+    // from the one you actually meant.
+    const esc = (s) => String(s || "").replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
     suggestBox.innerHTML = hits.map((hit, i) =>
-      `<button type="button" class="loc-suggestion" data-idx="${i}">${hit.placeName}</button>`
+      `<button type="button" class="loc-suggestion" data-idx="${i}">${esc(hit.placeName)}` +
+      (hit.country ? `<small>${esc(hit.country)}</small>` : "") +
+      `</button>`
     ).join("");
     suggestBox.hidden = false;
     suggestBox.querySelectorAll(".loc-suggestion").forEach(btn => {
@@ -3759,7 +3840,7 @@ const ASK_KB = [
   },
   {
     topic: "Photo not detected as a sky/sunset photo",
-    keywords: ["not a sky photo", "not detected as sunset", "didn't detect my sunset", "photo was rejected", "photo rejected", "rejected", "doesn't look like a sky", "photo not scored", "didn't score my photo", "wasn't detected", "not get detected", "not detected", "didn't get detected", "photo not detected"],
+    keywords: ["not a sky photo", "not detected as sunset", "didn't detect my sunset", "photo was rejected", "photo rejected", "rejected", "doesn't look like a sky", "photo not scored", "didn't score my photo", "wasn't detected", "not get detected", "not detected", "didn't get detected", "photo not detected", "detected", "detected as"],
     answer: "The app looks for a smooth, low-detail region at the top of the frame (the sky) above a busier foreground (trees, a treeline, buildings, a person), and only scores the sky region. It gets rejected as 'not a sky photo' if that smooth region is too small, too busy (heavy clouds/texture read as detail), or if a face-like patch of skin-tone color is detected. If a genuine sunset shot gets rejected, it's almost always because the sky was a small sliver of the frame or had unusually heavy texture - cropping in tighter on the sky before uploading usually fixes it."
   },
   {
@@ -3844,7 +3925,7 @@ const ASK_KB = [
   },
   {
     topic: "Shoot Log",
-    keywords: ["shoot log", "log entry", "export csv", "clear log", "add entry"],
+    keywords: ["shoot log", "log entry", "export csv", "clear log", "add entry", "export"],
     answer: "The Shoot Log records what you shot, when, and the conditions at the time, and it's how calibration learns your locations. Export CSV downloads the whole log as a spreadsheet file. Clear Log deletes every entry and resets calibration back to zero."
   },
   {
@@ -3869,7 +3950,7 @@ const ASK_KB = [
   },
   {
     topic: "Clear cache / stuck data",
-    keywords: ["stuck", "cached data", "clear cache", "old data", "not updating", "stale"],
+    keywords: ["stuck", "cached data", "clear cache", "old data", "not updating", "stale", "cache"],
     answer: "If the dashboard looks stuck on old numbers, go to Settings and tap 'Clear Cached Data & Refresh'. It throws away the saved last-known-good reading and pulls a completely fresh one."
   },
   {
@@ -3944,7 +4025,7 @@ const ASK_KB = [
   },
   {
     topic: "Why weather numbers differ from another weather app",
-    keywords: ["differs from another app", "different from apple weather", "different from weather app", "why is the temperature different", "disagrees with", "another site says", "which weather app is right", "most accurate weather"],
+    keywords: ["differs from another app", "different from apple weather", "different from weather app", "why is the temperature different", "disagrees with", "another site says", "which weather app is right", "most accurate weather", "data accurate", "weather accurate", "different weather", "accurate weather"],
     answer: "Weather here comes from Open-Meteo, which blends 15+ national weather agency models (NOAA, ECMWF, DWD, and others) and picks the highest-resolution one for your spot - it's a legitimate, free data source, the same class of underlying model most weather apps are built on. Two different weather providers forecasting the same hour will still disagree by a couple of degrees sometimes, especially in places with fewer nearby weather stations - that's normal model variance, not a bug in either one, and no single provider is 'the most accurate' across every location and day."
   }
 ];
